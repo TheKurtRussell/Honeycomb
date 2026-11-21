@@ -1,0 +1,27 @@
+# Managed component dependencies for the P4 app.
+# Fetched by `idf.py reconfigure` from the ESP Component Registry.
+dependencies:
+  idf: ">=5.5"
+
+  # --- P4+C6 Wi-Fi (phase 2 WIFI mode) ---
+  # esp_hosted brings Wi-Fi from the C6 to the P4 over SDIO. 3.0.4+ has M5Stack
+  # Tab5 board defaults. esp_wifi_remote is pulled in transitively.
+  espressif/esp_hosted: ">=3.0.4"
+
+  # --- USB host serial for the flasher (phase 2 transport) ---
+  # usb_host_vcp is the umbrella that auto-selects the right bridge driver.
+  espressif/usb_host_vcp: "^1.0.0"
+  espressif/usb_host_cdc_acm: "^2.0.0"
+  espressif/usb_host_cp210x_vcp: "^2.0.0"
+  espressif/usb_host_ch34x_vcp: "^2.0.0"
+  espressif/usb_host_ftdi_vcp: "^1.0.0"
+
+  # --- C6 updater: P4 flashes the C6 from SD (no USB pass-through needed) ---
+  espressif/esp-serial-flasher: "^2.1.0"
+
+  # --- UI ---
+  lvgl/lvgl: "^9.2.0"
+
+  # --- Display BSP (pick one; see hc_board.c) ---
+  # espressif/esp_lcd_touch_gt911: "^1.1.0"
+  # m5stack/m5stack_tab5: "*"   # if/when published
