@@ -38,7 +38,7 @@ jobs:
       - name: Build ${{ matrix.name }}
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.5
+          esp_idf_version: release-v5.5
           target: ${{ matrix.target }}
           path: ${{ matrix.path }}
           command: "PIP_CONSTRAINT= pip install -U idf-component-manager && sed -i 's/^idf-component-manager.*/idf-component-manager/' /opt/esp/idf/tools/requirements/requirements.core.txt && idf.py build"
