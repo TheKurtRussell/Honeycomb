@@ -53,8 +53,8 @@ static bool s_active;
 #define HDR_H   70
 #define COMB_OX 16
 #define COMB_OY (HDR_H + 12)
-#define COMB_COLS 14
-#define COMB_ROWS 10
+#define COMB_COLS 13
+#define COMB_ROWS 6
 
 /* One shared outline shape; every cell reuses it (relative points). */
 static const lv_point_precise_t HEXP[] = {
