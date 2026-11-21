@@ -16,7 +16,12 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include "esp_log.h"
+#include "esp_chip_info.h"
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#include "esp_app_desc.h"
 
 #if __has_include("bsp/esp-bsp.h")
 #include "lvgl.h"
@@ -66,23 +71,26 @@ static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
 
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_CAPTURE, TOOL_DECODE, TOOL_MESH, TOOL_CONFIG };
+
 typedef struct {
     int col, row;
     const char *icon;
     const char *name;
     uint32_t line_color;
     uint32_t text_color;
+    int id;
 } hc_tile_t;
 
 /* The six live tools, clustered near the comb's center so the hive extends in
  * every direction from the start. Every other cell is an empty comb cell. */
 static const hc_tile_t s_tiles[] = {
-    {6, 3, LV_SYMBOL_LIST,     "decode",   HC_HONEY, HC_LHONEY},
-    {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY},
-    {8, 3, LV_SYMBOL_SAVE,     "capture",  HC_HONEY, HC_LHONEY},
-    {6, 4, LV_SYMBOL_SETTINGS, "config",   HC_HONEY, HC_LHONEY},
-    {7, 4, LV_SYMBOL_SHUFFLE,  "mesh",     HC_CYAN,  HC_LCYAN },
-    {8, 4, LV_SYMBOL_WIFI,     "explorer", HC_CYAN,  HC_LCYAN },
+    {6, 3, LV_SYMBOL_LIST,     "decode",   HC_HONEY, HC_LHONEY, TOOL_DECODE},
+    {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY, TOOL_BENCH},
+    {8, 3, LV_SYMBOL_SAVE,     "capture",  HC_HONEY, HC_LHONEY, TOOL_CAPTURE},
+    {6, 4, LV_SYMBOL_SETTINGS, "config",   HC_HONEY, HC_LHONEY, TOOL_CONFIG},
+    {7, 4, LV_SYMBOL_SHUFFLE,  "mesh",     HC_CYAN,  HC_LCYAN,  TOOL_MESH},
+    {8, 4, LV_SYMBOL_WIFI,     "explorer", HC_CYAN,  HC_LCYAN,  TOOL_EXPLORER},
 };
 
 static const hc_tile_t *find_tile(int col, int row)
@@ -164,6 +172,139 @@ static lv_obj_t *status_chip(lv_obj_t *parent, const char *label, const char *va
     return v;
 }
 
+/* ---- tool views: tap a tile -> full-screen overlay with a back button ---- */
+static lv_obj_t  *s_overlay;
+static lv_timer_t *s_tool_timer;
+static lv_obj_t  *s_dash_psram;
+static lv_obj_t  *s_dash_heap;
+static lv_obj_t  *s_dash_uptime;
+
+static void close_tool(lv_event_t *e)
+{
+    (void)e;
+    if (s_tool_timer) { lv_timer_delete(s_tool_timer); s_tool_timer = NULL; }
+    if (s_overlay)    { lv_obj_delete(s_overlay); s_overlay = NULL; }
+    s_dash_psram = s_dash_heap = s_dash_uptime = NULL;
+}
+
+static lv_obj_t *tool_shell(const char *title)
+{
+    s_overlay = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(s_overlay);
+    lv_obj_set_size(s_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_overlay, lv_color_hex(HC_BG), 0);
+    lv_obj_set_style_bg_opa(s_overlay, LV_OPA_COVER, 0);
+    lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *back = lv_button_create(s_overlay);
+    lv_obj_set_size(back, 120, 48);
+    lv_obj_align(back, LV_ALIGN_TOP_LEFT, 14, 12);
+    lv_obj_set_style_bg_color(back, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(back, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_border_width(back, 1, 0);
+    lv_obj_set_style_radius(back, 10, 0);
+    lv_obj_add_event_cb(back, close_tool, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *bl = lv_label_create(back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT "  back");
+    lv_obj_set_style_text_color(bl, lv_color_hex(HC_HONEY), 0);
+    lv_obj_center(bl);
+
+    lv_obj_t *tt = lv_label_create(s_overlay);
+    lv_label_set_text(tt, title);
+    lv_obj_set_style_text_color(tt, lv_color_hex(HC_HONEY), 0);
+    lv_obj_align(tt, LV_ALIGN_TOP_LEFT, 160, 24);
+    return s_overlay;
+}
+
+static lv_obj_t *dash_row(lv_obj_t *parent, const char *k, const char *v, int y)
+{
+    lv_obj_t *kl = lv_label_create(parent);
+    lv_label_set_text(kl, k);
+    lv_obj_set_style_text_color(kl, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(kl, LV_ALIGN_TOP_LEFT, 0, y);
+
+    lv_obj_t *vl = lv_label_create(parent);
+    lv_label_set_text(vl, v);
+    lv_obj_set_style_text_color(vl, lv_color_hex(HC_LHONEY), 0);
+    lv_obj_align(vl, LV_ALIGN_TOP_LEFT, 200, y);
+    return vl;
+}
+
+static void dash_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    char buf[48];
+    if (s_dash_psram) {
+        snprintf(buf, sizeof(buf), "%u / %u KB",
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+                 (unsigned)(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024));
+        lv_label_set_text(s_dash_psram, buf);
+    }
+    if (s_dash_heap) {
+        snprintf(buf, sizeof(buf), "%u KB free",
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
+        lv_label_set_text(s_dash_heap, buf);
+    }
+    if (s_dash_uptime) {
+        unsigned long s = (unsigned long)(esp_timer_get_time() / 1000000ULL);
+        snprintf(buf, sizeof(buf), "%luh %02lum %02lus", s / 3600, (s % 3600) / 60, s % 60);
+        lv_label_set_text(s_dash_uptime, buf);
+    }
+}
+
+static void open_config(void)
+{
+    lv_obj_t *ov = tool_shell("device");
+    lv_obj_t *body = lv_obj_create(ov);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, LV_PCT(80), LV_PCT(70));
+    lv_obj_align(body, LV_ALIGN_TOP_LEFT, 44, 96);
+
+    esp_chip_info_t ci;
+    esp_chip_info(&ci);
+    char buf[48];
+    int y = 0;
+    const int dy = 42;
+
+    dash_row(body, "CHIP", "ESP32-P4", y); y += dy;
+    snprintf(buf, sizeof(buf), "%d", ci.cores);
+    dash_row(body, "CORES", buf, y); y += dy;
+    snprintf(buf, sizeof(buf), "rev %d", ci.revision);
+    dash_row(body, "SILICON", buf, y); y += dy;
+
+    const esp_app_desc_t *ad = esp_app_get_description();
+    dash_row(body, "FIRMWARE", ad ? ad->version : "?", y); y += dy;
+
+    s_dash_psram  = dash_row(body, "PSRAM", "...", y); y += dy;
+    s_dash_heap   = dash_row(body, "HEAP", "...", y); y += dy;
+    s_dash_uptime = dash_row(body, "UPTIME", "...", y); y += dy;
+
+    dash_timer_cb(NULL);
+    s_tool_timer = lv_timer_create(dash_timer_cb, 1000, NULL);
+}
+
+static void open_msg(const char *title, const char *msg, uint32_t color)
+{
+    lv_obj_t *ov = tool_shell(title);
+    lv_obj_t *m = lv_label_create(ov);
+    lv_label_set_text(m, msg);
+    lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(m, lv_color_hex(color), 0);
+    lv_obj_center(m);
+}
+
+static void tile_click_cb(lv_event_t *e)
+{
+    if (s_overlay) return;
+    int id = (int)(intptr_t)lv_event_get_user_data(e);
+    switch (id) {
+        case TOOL_CONFIG: open_config(); break;
+        case TOOL_BENCH:  open_msg("usb bench", "coming soon", HC_LHONEY); break;
+        default:          open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
+    }
+}
+
 #endif /* HAVE_LVGL */
 
 esp_err_t hc_ui_init(void *lv_display)
@@ -216,6 +357,11 @@ esp_err_t hc_ui_init(void *lv_display)
                 lv_label_set_text(nm, t->name);
                 lv_obj_set_style_text_color(nm, lv_color_hex(t->text_color), 0);
                 lv_obj_align(nm, LV_ALIGN_CENTER, 0, 14);
+
+                /* tappable: a short tap opens the tool, a drag still pans */
+                lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_add_event_cb(cell, tile_click_cb, LV_EVENT_CLICKED,
+                                    (void *)(intptr_t)t->id);
             }
         }
     }
