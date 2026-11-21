@@ -44,7 +44,7 @@ void app_main(void)
     ESP_ERROR_CHECK(hc_board_init());        /* display BSP (headless until bound) */
     hc_storage_mount();                      /* SD; non-fatal if absent */
 
-    hc_ui_init(NULL);                        /* pass the lv_display from BSP later */
+    hc_ui_init(hc_board_lvgl_display());     /* bound to the BSP display */
 
     hc_explorer_callbacks_t ecb = { .on_row = on_row, .on_energy = on_energy,
                                     .on_scan = on_scan };

@@ -31,9 +31,13 @@ extern "C" {
 
 /* ---- microSD (SDMMC) — see hc_storage.c; pins reported as G39..G44 -------- */
 
-/* Bring up display + touch + backlight (esp_lcd MIPI-DSI + GT911). Returns the
- * LVGL display handle via lv_disp internally; see hc_ui. */
+/* Bring up display + touch + backlight via the M5Stack Tab5 BSP (handles the
+ * MIPI-DSI panel, GT911/ST7123 touch, the display LDO rail, and LVGL). */
 esp_err_t hc_board_init(void);
+
+/* The LVGL display created by the BSP, as void* (so non-UI code needn't pull in
+ * LVGL types). NULL if the display didn't come up. hc_ui_init() takes this. */
+void *hc_board_lvgl_display(void);
 
 /* Pulse the C6 reset line (used by the mode manager). */
 void hc_board_c6_reset(void);

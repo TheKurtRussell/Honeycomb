@@ -14,8 +14,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "bsp/esp-bsp.h"      /* M5Stack Tab5 BSP: bsp_display_start(), etc. */
 
 #define TAG "hc_board"
+
+static lv_display_t *s_lv_disp;
 
 void hc_board_c6_reset(void)
 {
@@ -32,15 +35,19 @@ void hc_board_c6_reset(void)
 
 esp_err_t hc_board_init(void)
 {
-    /* TODO(display): call the Tab5 BSP here, e.g.
-     *   bsp_i2c_init();
-     *   lv_display_t *disp = bsp_display_start();
-     *   bsp_display_backlight_on();
-     * and hand `disp` to hc_ui_init(). Until wired, the app still runs headless
-     * and logs to the console, so the link/sniffer/flasher are all testable. */
-    ESP_LOGW(TAG, "display BSP not yet bound — running headless (see hc_board.c)");
+    /* The BSP brings up the MIPI-DSI panel, touch, the display LDO rail, and
+     * starts the LVGL port, returning the LVGL display. */
+    s_lv_disp = bsp_display_start();
+    if (!s_lv_disp) {
+        ESP_LOGE(TAG, "bsp_display_start() failed");
+        return ESP_FAIL;
+    }
+    bsp_display_backlight_on();
+    ESP_LOGI(TAG, "display up");
     return ESP_OK;
 }
+
+void *hc_board_lvgl_display(void) { return s_lv_disp; }
 
 esp_err_t hc_board_power_read(int *mv, int *ma)
 {
