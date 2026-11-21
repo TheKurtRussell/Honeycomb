@@ -35,11 +35,12 @@ jobs:
       - name: Dump esp-serial-flasher API (debug)
         if: always()
         run: |
-          echo "===== port/esp32_port.h ====="
-          find ${{ matrix.path }} -path '*esp-serial-flasher*' -name 'esp32_port.h' -exec cat {} + 2>/dev/null || true
-          echo "===== include/esp_loader.h (api) ====="
-          find ${{ matrix.path }} -path '*esp-serial-flasher*' -name 'esp_loader.h' \
-            -exec grep -nE 'init_sdio|init_serial|flash_cfg|flash_start|flash_write|flash_finish|reset_target|_port_t|typedef' {} + 2>/dev/null || true
+          echo "===== headers mentioning sdio ====="
+          hdrs=$(grep -rilE 'sdio' $(find ${{ matrix.path }} -path '*esp-serial-flasher*' -name '*.h') 2>/dev/null)
+          echo "$hdrs"
+          for h in $hdrs; do echo "----- $h -----"; cat "$h"; done
+          echo "===== esp_loader_flash_cfg_t ====="
+          find ${{ matrix.path }} -path '*esp-serial-flasher*' -name 'esp_loader.h' -exec sed -n '130,150p' {} + 2>/dev/null || true
 
       - name: Merge ${{ matrix.name }} image
         run: |
@@ -65,17 +66,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Collect binaries into the web flasher
-        uses: actions/download-artifact@v4
-        with:
-          path: _artifacts
-      - name: Assemble site
-        run: |
-          mkdir -p _site
-          cp -r webflasher/* _site/
-          cp _artifacts/honeycomb-p4/merged-p4.bin _site/merged-p4.bin
-          cp _artifacts/honeycomb-c6/merged-c6.bin _site/merged-c6.bin
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-      - id: deploy
-        uses: actions/deploy-pages@v4
+        uses:
