@@ -48,7 +48,7 @@ esp_err_t hc_board_init(void)
      * LVGL display 90 so it's upright held in the left hand over the battery.
      * (If it comes up the wrong way, this becomes LV_DISPLAY_ROTATION_270.) */
     if (bsp_display_lock(1000)) {
-        lv_display_set_rotation(s_lv_disp, LV_DISPLAY_ROTATION_90);
+        lv_display_set_rotation(s_lv_disp, LV_DISPLAY_ROTATION_270);
         bsp_display_unlock();
     }
 

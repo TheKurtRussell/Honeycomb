@@ -53,8 +53,8 @@ static bool s_active;
 #define HDR_H   70
 #define COMB_OX 16
 #define COMB_OY (HDR_H + 12)
-#define COMB_COLS 8
-#define COMB_ROWS 11
+#define COMB_COLS 14
+#define COMB_ROWS 10
 
 /* One shared outline shape; every cell reuses it (relative points). */
 static const lv_point_precise_t HEXP[] = {
@@ -66,18 +66,34 @@ static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
 /* --- free 2D drag-to-pan with momentum ---
- * LVGL's native scroll locks to one axis per gesture; we want map-style
- * diagonal panning, so we drive lv_obj_scroll_by() ourselves from the pointer
- * vector and let a decaying timer carry the fling after release. */
-static lv_obj_t  *s_pan;
+ * Map-style panning in any direction. Rather than LVGL's axis-locked scroll, we
+ * reposition the comb field directly (lv_obj_set_pos), clamped so it can't be
+ * dragged fully off-screen, with a decaying timer for fling momentum. */
+static lv_obj_t  *s_pan;       /* viewport (clips)  */
+static lv_obj_t  *s_field;     /* the comb (moves)  */
 static lv_timer_t *s_fling;
+static int s_fx, s_fy;         /* current comb offset */
 static int s_vx, s_vy;
+
+static void pan_apply(void)
+{
+    if (!s_pan || !s_field) return;
+    int cw = lv_obj_get_width(s_pan),  ch = lv_obj_get_height(s_pan);
+    int fw = lv_obj_get_width(s_field), fh = lv_obj_get_height(s_field);
+    int minx = cw - fw, miny = ch - fh;
+    if (minx > 0) minx = 0;
+    if (miny > 0) miny = 0;
+    if (s_fx > 0) s_fx = 0;  else if (s_fx < minx) s_fx = minx;
+    if (s_fy > 0) s_fy = 0;  else if (s_fy < miny) s_fy = miny;
+    lv_obj_set_pos(s_field, s_fx, s_fy);
+}
 
 static void fling_cb(lv_timer_t *t)
 {
     s_vx = (s_vx * 9) / 10;
     s_vy = (s_vy * 9) / 10;
-    if (s_pan) lv_obj_scroll_by(s_pan, s_vx, s_vy, LV_ANIM_OFF);
+    s_fx += s_vx; s_fy += s_vy;
+    pan_apply();
     if (s_vx > -2 && s_vx < 2 && s_vy > -2 && s_vy < 2) { lv_timer_delete(t); s_fling = NULL; }
 }
 
@@ -92,7 +108,8 @@ static void pan_cb(lv_event_t *e)
         if (!indev) return;
         lv_point_t v;
         lv_indev_get_vect(indev, &v);
-        lv_obj_scroll_by(s_pan, v.x, v.y, LV_ANIM_OFF);
+        s_fx += v.x; s_fy += v.y;
+        pan_apply();
         s_vx = v.x; s_vy = v.y;
     } else if (code == LV_EVENT_RELEASED) {
         if ((s_vx > 3 || s_vx < -3 || s_vy > 3 || s_vy < -3) && !s_fling)
@@ -222,6 +239,7 @@ esp_err_t hc_ui_init(void *lv_display)
     lv_obj_t *field = bare(cont);
     lv_obj_set_size(field, COMB_OX * 2 + COMB_COLS * HEX_AX + HEX_W / 4,
                            COMB_OY + COMB_ROWS * HEX_AY + HEX_H);
+    s_field = field;
 
     for (int c = 0; c < COMB_COLS; c++) {
         for (int r = 0; r < COMB_ROWS; r++) {
