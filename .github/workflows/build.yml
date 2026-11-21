@@ -32,6 +32,15 @@ jobs:
           target: ${{ matrix.target }}
           path: ${{ matrix.path }}
 
+      - name: Dump esp-serial-flasher API (debug)
+        if: always()
+        run: |
+          echo "===== port/esp32_port.h ====="
+          find ${{ matrix.path }} -path '*esp-serial-flasher*' -name 'esp32_port.h' -exec cat {} + 2>/dev/null || true
+          echo "===== include/esp_loader.h (api) ====="
+          find ${{ matrix.path }} -path '*esp-serial-flasher*' -name 'esp_loader.h' \
+            -exec grep -nE 'init_sdio|init_serial|flash_cfg|flash_start|flash_write|flash_finish|reset_target|_port_t|typedef' {} + 2>/dev/null || true
+
       - name: Merge ${{ matrix.name }} image
         run: |
           python -m pip install --quiet esptool
