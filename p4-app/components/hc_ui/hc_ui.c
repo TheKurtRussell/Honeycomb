@@ -65,57 +65,6 @@ static lv_obj_t *s_mode_lbl;
 static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
-/* --- free 2D drag-to-pan with momentum ---
- * Map-style panning in any direction. Rather than LVGL's axis-locked scroll, we
- * reposition the comb field directly (lv_obj_set_pos), clamped so it can't be
- * dragged fully off-screen, with a decaying timer for fling momentum. */
-static lv_obj_t  *s_pan;       /* viewport (clips)  */
-static lv_obj_t  *s_field;     /* the comb (moves)  */
-static lv_timer_t *s_fling;
-static int s_fx, s_fy;         /* current comb offset */
-static int s_vx, s_vy;
-
-static void pan_apply(void)
-{
-    if (!s_pan || !s_field) return;
-    int cw = lv_obj_get_width(s_pan),  ch = lv_obj_get_height(s_pan);
-    int fw = lv_obj_get_width(s_field), fh = lv_obj_get_height(s_field);
-    int minx = cw - fw, miny = ch - fh;
-    if (minx > 0) minx = 0;
-    if (miny > 0) miny = 0;
-    if (s_fx > 0) s_fx = 0;  else if (s_fx < minx) s_fx = minx;
-    if (s_fy > 0) s_fy = 0;  else if (s_fy < miny) s_fy = miny;
-    lv_obj_set_pos(s_field, s_fx, s_fy);
-}
-
-static void fling_cb(lv_timer_t *t)
-{
-    s_vx = (s_vx * 9) / 10;
-    s_vy = (s_vy * 9) / 10;
-    s_fx += s_vx; s_fy += s_vy;
-    pan_apply();
-    if (s_vx > -2 && s_vx < 2 && s_vy > -2 && s_vy < 2) { lv_timer_delete(t); s_fling = NULL; }
-}
-
-static void pan_cb(lv_event_t *e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_PRESSED) {
-        if (s_fling) { lv_timer_delete(s_fling); s_fling = NULL; }
-        s_vx = s_vy = 0;
-    } else if (code == LV_EVENT_PRESSING) {
-        lv_indev_t *indev = lv_indev_active();
-        if (!indev) return;
-        lv_point_t v;
-        lv_indev_get_vect(indev, &v);
-        s_fx += v.x; s_fy += v.y;
-        pan_apply();
-        s_vx = v.x; s_vy = v.y;
-    } else if (code == LV_EVENT_RELEASED) {
-        if ((s_vx > 3 || s_vx < -3 || s_vy > 3 || s_vy < -3) && !s_fling)
-            s_fling = lv_timer_create(fling_cb, 16, NULL);
-    }
-}
 
 typedef struct {
     int col, row;
@@ -230,16 +179,15 @@ esp_err_t hc_ui_init(void *lv_display)
     /* --- pannable comb --- */
     lv_obj_t *cont = bare(scr);
     lv_obj_set_size(cont, LV_PCT(100), LV_PCT(100));
-    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);  /* custom free-pan, not axis-locked scroll */
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);      /* so it receives press/drag events */
+    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(cont, LV_DIR_ALL);
+    lv_obj_set_scroll_snap_x(cont, LV_SCROLL_SNAP_NONE);
+    lv_obj_set_scroll_snap_y(cont, LV_SCROLL_SNAP_NONE);
     lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_event_cb(cont, pan_cb, LV_EVENT_ALL, NULL);
-    s_pan = cont;
 
     lv_obj_t *field = bare(cont);
     lv_obj_set_size(field, COMB_OX * 2 + COMB_COLS * HEX_AX + HEX_W / 4,
                            COMB_OY + COMB_ROWS * HEX_AY + HEX_H);
-    s_field = field;
 
     for (int c = 0; c < COMB_COLS; c++) {
         for (int r = 0; r < COMB_ROWS; r++) {
