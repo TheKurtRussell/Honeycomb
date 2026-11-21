@@ -178,6 +178,7 @@ static lv_obj_t *status_chip(lv_obj_t *parent, const char *label, const char *va
 
 /* ---- tool views: tap a tile -> full-screen overlay with a back button ---- */
 static lv_obj_t  *s_overlay;
+static bool       s_tool_pending;
 static lv_timer_t *s_tool_timer;
 static lv_obj_t  *s_dash_psram;
 static lv_obj_t  *s_dash_heap;
@@ -187,8 +188,9 @@ static void close_tool(lv_event_t *e)
 {
     (void)e;
     if (s_tool_timer) { lv_timer_delete(s_tool_timer); s_tool_timer = NULL; }
-    if (s_overlay)    { lv_obj_delete(s_overlay); s_overlay = NULL; }
+    if (s_overlay)    { lv_obj_delete_async(s_overlay); s_overlay = NULL; }
     s_dash_psram = s_dash_heap = s_dash_uptime = NULL;
+    s_tool_pending = false;
 }
 
 static lv_obj_t *tool_shell(const char *title)
@@ -298,15 +300,23 @@ static void open_msg(const char *title, const char *msg, uint32_t color)
     lv_obj_center(m);
 }
 
-static void tile_click_cb(lv_event_t *e)
+static void async_open_tool(void *p)
 {
+    s_tool_pending = false;
     if (s_overlay) return;
-    int id = (int)(intptr_t)lv_event_get_user_data(e);
+    int id = (int)(intptr_t)p;
     switch (id) {
         case TOOL_CONFIG: open_config(); break;
         case TOOL_BENCH:  open_msg("usb bench", "coming soon", HC_LHONEY); break;
         default:          open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
+}
+
+static void tile_click_cb(lv_event_t *e)
+{
+    if (s_overlay || s_tool_pending) return;
+    s_tool_pending = true;
+    lv_async_call(async_open_tool, lv_event_get_user_data(e));
 }
 
 /* ---- hidden "buzz" mini-game: flap the bee through the comb ---- */
@@ -447,11 +457,20 @@ static void open_game(void)
     s_tool_timer = lv_timer_create(game_tick, 30, NULL);
 }
 
+static void async_open_game(void *p)
+{
+    (void)p;
+    s_tool_pending = false;
+    if (s_overlay) return;
+    open_game();
+}
+
 static void game_click_cb(lv_event_t *e)
 {
     (void)e;
-    if (s_overlay) return;
-    open_game();
+    if (s_overlay || s_tool_pending) return;
+    s_tool_pending = true;
+    lv_async_call(async_open_game, NULL);
 }
 
 #endif /* HAVE_LVGL */
