@@ -43,7 +43,16 @@ esp_err_t hc_board_init(void)
         return ESP_FAIL;
     }
     bsp_display_backlight_on();
-    ESP_LOGI(TAG, "display up");
+
+    /* Boot into landscape. The panel is portrait-native (720x1280); rotate the
+     * LVGL display 90 so it's upright held in the left hand over the battery.
+     * (If it comes up the wrong way, this becomes LV_DISPLAY_ROTATION_270.) */
+    if (bsp_display_lock(1000)) {
+        lv_display_set_rotation(s_lv_disp, LV_DISPLAY_ROTATION_90);
+        bsp_display_unlock();
+    }
+
+    ESP_LOGI(TAG, "display up (landscape)");
     return ESP_OK;
 }
 

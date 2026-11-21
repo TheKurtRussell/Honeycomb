@@ -65,6 +65,41 @@ static lv_obj_t *s_mode_lbl;
 static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
+/* --- free 2D drag-to-pan with momentum ---
+ * LVGL's native scroll locks to one axis per gesture; we want map-style
+ * diagonal panning, so we drive lv_obj_scroll_by() ourselves from the pointer
+ * vector and let a decaying timer carry the fling after release. */
+static lv_obj_t  *s_pan;
+static lv_timer_t *s_fling;
+static int s_vx, s_vy;
+
+static void fling_cb(lv_timer_t *t)
+{
+    s_vx = (s_vx * 9) / 10;
+    s_vy = (s_vy * 9) / 10;
+    if (s_pan) lv_obj_scroll_by(s_pan, s_vx, s_vy, LV_ANIM_OFF);
+    if (s_vx > -2 && s_vx < 2 && s_vy > -2 && s_vy < 2) { lv_timer_delete(t); s_fling = NULL; }
+}
+
+static void pan_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        if (s_fling) { lv_timer_delete(s_fling); s_fling = NULL; }
+        s_vx = s_vy = 0;
+    } else if (code == LV_EVENT_PRESSING) {
+        lv_indev_t *indev = lv_indev_active();
+        if (!indev) return;
+        lv_point_t v;
+        lv_indev_get_vect(indev, &v);
+        lv_obj_scroll_by(s_pan, v.x, v.y, LV_ANIM_OFF);
+        s_vx = v.x; s_vy = v.y;
+    } else if (code == LV_EVENT_RELEASED) {
+        if ((s_vx > 3 || s_vx < -3 || s_vy > 3 || s_vy < -3) && !s_fling)
+            s_fling = lv_timer_create(fling_cb, 16, NULL);
+    }
+}
+
 typedef struct {
     int col, row;
     const char *icon;
@@ -178,9 +213,11 @@ esp_err_t hc_ui_init(void *lv_display)
     /* --- pannable comb --- */
     lv_obj_t *cont = bare(scr);
     lv_obj_set_size(cont, LV_PCT(100), LV_PCT(100));
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(cont, LV_DIR_ALL);
+    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);  /* custom free-pan, not axis-locked scroll */
+    lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);      /* so it receives press/drag events */
     lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_event_cb(cont, pan_cb, LV_EVENT_ALL, NULL);
+    s_pan = cont;
 
     lv_obj_t *field = bare(cont);
     lv_obj_set_size(field, COMB_OX * 2 + COMB_COLS * HEX_AX + HEX_W / 4,
