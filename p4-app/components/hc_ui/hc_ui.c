@@ -53,8 +53,8 @@ static bool s_active;
 #define HDR_H   70
 #define COMB_OX 16
 #define COMB_OY (HDR_H + 12)
-#define COMB_COLS 13
-#define COMB_ROWS 6
+#define COMB_COLS 15
+#define COMB_ROWS 8
 
 /* One shared outline shape; every cell reuses it (relative points). */
 static const lv_point_precise_t HEXP[] = {
@@ -74,14 +74,15 @@ typedef struct {
     uint32_t text_color;
 } hc_tile_t;
 
-/* The six live tools; every other cell is an empty comb cell. */
+/* The six live tools, clustered near the comb's center so the hive extends in
+ * every direction from the start. Every other cell is an empty comb cell. */
 static const hc_tile_t s_tiles[] = {
-    {1, 1, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY},
-    {2, 1, LV_SYMBOL_WIFI,     "explorer", HC_CYAN,  HC_LCYAN },
-    {2, 2, LV_SYMBOL_SAVE,     "capture",  HC_HONEY, HC_LHONEY},
-    {3, 1, LV_SYMBOL_LIST,     "decode",   HC_HONEY, HC_LHONEY},
-    {3, 2, LV_SYMBOL_SHUFFLE,  "mesh",     HC_CYAN,  HC_LCYAN },
-    {4, 1, LV_SYMBOL_SETTINGS, "config",   HC_HONEY, HC_LHONEY},
+    {6, 3, LV_SYMBOL_LIST,     "decode",   HC_HONEY, HC_LHONEY},
+    {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY},
+    {8, 3, LV_SYMBOL_SAVE,     "capture",  HC_HONEY, HC_LHONEY},
+    {6, 4, LV_SYMBOL_SETTINGS, "config",   HC_HONEY, HC_LHONEY},
+    {7, 4, LV_SYMBOL_SHUFFLE,  "mesh",     HC_CYAN,  HC_LCYAN },
+    {8, 4, LV_SYMBOL_WIFI,     "explorer", HC_CYAN,  HC_LCYAN },
 };
 
 static const hc_tile_t *find_tile(int col, int row)
@@ -248,6 +249,15 @@ esp_err_t hc_ui_init(void *lv_display)
     lv_obj_t *c6_chip = status_chip(hdr, "C6 RADIO", "waiting", HC_AMBER);
     lv_obj_align(lv_obj_get_parent(c6_chip), LV_ALIGN_RIGHT_MID, -100, 0);
     s_mode_lbl = c6_chip;
+
+    /* Start centered so the comb extends in every direction from the first view. */
+    lv_obj_update_layout(scr);
+    int vw = lv_obj_get_width(cont),  vh = lv_obj_get_height(cont);
+    int fw = lv_obj_get_width(field), fh = lv_obj_get_height(field);
+    int sx = (fw - vw) / 2, sy = (fh - vh) / 2;
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+    lv_obj_scroll_to(cont, sx, sy, LV_ANIM_OFF);
 
     bsp_display_unlock();
     s_active = true;
