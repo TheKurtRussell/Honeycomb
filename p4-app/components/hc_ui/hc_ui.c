@@ -1,15 +1,15 @@
 /*
- * Honeycomb — P4 UI (LVGL) — Cyberpunk 2077 theme
+ * Honeycomb — P4 UI (LVGL) — "cyberpunk honeycomb" theme
  *
- * First-light build: a themed status screen that proves the display + theme are
- * alive, using only core LVGL objects (robust across LVGL 9.x). The full tabbed
- * Bench/Explorer interface layers on once we confirm pixels.
+ * A pannable comb of hexagonal tiles over a warm-charcoal field, with a pinned
+ * header (bumblebee mark + status chips). Honey-gold primary, soft cyan accent.
+ * Tiles are hexagon OUTLINES drawn with lv_line (stable across LVGL 9.x); the
+ * whole comb lives in a scrollable container you can drag in any direction.
  *
- * Palette: near-black base, electric yellow primary, cyan + magenta accents,
- * angular (radius 0) neon-bordered panels.
+ * Orientation: native for now. Landscape rotation lands in a follow-up once the
+ * comb is confirmed on-panel (DSI direct-mode rotation is handled separately).
  *
- * Threading: LVGL runs in the BSP's lvgl_port task, so every touch of an LVGL
- * object is wrapped in bsp_display_lock()/bsp_display_unlock().
+ * Threading: every LVGL touch is wrapped in bsp_display_lock()/unlock().
  */
 #include "hc_ui.h"
 #include "hc_mode_manager.h"
@@ -28,84 +28,227 @@
 
 #define TAG "hc_ui"
 
-/* ---- Cyberpunk palette ---- */
-#define HC_BG      0x0A0A0F
-#define HC_PANEL   0x14141C
-#define HC_YELLOW  0xFCEE09
-#define HC_CYAN    0x00F0FF
-#define HC_MAGENTA 0xFF003C
-#define HC_DIM     0x8A8AA0
+/* ---- honeycomb palette ---- */
+#define HC_BG       0x15110A   /* warm charcoal field            */
+#define HC_HDR      0x15110A   /* header strip                   */
+#define HC_PANEL    0x1C160D   /* status chip                    */
+#define HC_HONEY    0xFFC233   /* primary                        */
+#define HC_AMBER    0xF5A623   /* "waiting" amber                */
+#define HC_CYAN     0x38E0E0   /* accent                         */
+#define HC_DIMLINE  0x4A3A16   /* empty comb-cell outline        */
+#define HC_LHONEY   0xE8C98A   /* honey label                    */
+#define HC_LCYAN    0x9EE6E6   /* cyan label                     */
+#define HC_DIMTXT   0x8A7A52   /* muted text                     */
+#define HC_STRIPE   0x1A1206   /* bee stripes                    */
 
 static bool s_active;
 
 #if HAVE_LVGL
+
+/* Hexagon dimensions (flat-top) and comb spacing. */
+#define HEX_W   150
+#define HEX_H   130
+#define HEX_AX  112            /* column advance = 0.75 * W       */
+#define HEX_AY  130            /* row advance    = H              */
+#define HDR_H   70
+#define COMB_OX 16
+#define COMB_OY (HDR_H + 12)
+#define COMB_COLS 8
+#define COMB_ROWS 11
+
+/* One shared outline shape; every cell reuses it (relative points). */
+static const lv_point_precise_t HEXP[] = {
+    {37, 0}, {113, 0}, {150, 65}, {113, 130}, {37, 130}, {0, 65}, {37, 0}
+};
+
 static lv_obj_t *s_mode_lbl;
 static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
-/* Make an angular neon-bordered panel. */
-static lv_obj_t *panel(lv_obj_t *parent, uint32_t border)
+typedef struct {
+    int col, row;
+    const char *icon;
+    const char *name;
+    uint32_t line_color;
+    uint32_t text_color;
+} hc_tile_t;
+
+/* The six live tools; every other cell is an empty comb cell. */
+static const hc_tile_t s_tiles[] = {
+    {1, 1, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY},
+    {2, 1, LV_SYMBOL_WIFI,     "explorer", HC_CYAN,  HC_LCYAN },
+    {2, 2, LV_SYMBOL_SAVE,     "capture",  HC_HONEY, HC_LHONEY},
+    {3, 1, LV_SYMBOL_LIST,     "decode",   HC_HONEY, HC_LHONEY},
+    {3, 2, LV_SYMBOL_SHUFFLE,  "mesh",     HC_CYAN,  HC_LCYAN },
+    {4, 1, LV_SYMBOL_SETTINGS, "config",   HC_HONEY, HC_LHONEY},
+};
+
+static const hc_tile_t *find_tile(int col, int row)
 {
-    lv_obj_t *p = lv_obj_create(parent);
-    lv_obj_set_style_bg_color(p, lv_color_hex(HC_PANEL), 0);
-    lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(p, lv_color_hex(border), 0);
-    lv_obj_set_style_border_width(p, 1, 0);
-    lv_obj_set_style_radius(p, 0, 0);          /* angular */
-    lv_obj_set_style_pad_all(p, 12, 0);
-    return p;
+    for (size_t i = 0; i < sizeof(s_tiles) / sizeof(s_tiles[0]); i++)
+        if (s_tiles[i].col == col && s_tiles[i].row == row) return &s_tiles[i];
+    return NULL;
 }
 
-static lv_obj_t *label(lv_obj_t *parent, const char *txt, uint32_t color)
+static lv_obj_t *bare(lv_obj_t *parent)
 {
-    lv_obj_t *l = lv_label_create(parent);
-    lv_label_set_text(l, txt);
-    lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
-    return l;
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_remove_style_all(o);
+    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+    return o;
 }
+
+/* Little bumblebee, built from a few styled objects. */
+static void build_bee(lv_obj_t *parent)
+{
+    lv_obj_t *bee = bare(parent);
+    lv_obj_set_size(bee, 34, 30);
+
+    lv_obj_t *wl = lv_obj_create(bee);
+    lv_obj_remove_style_all(wl);
+    lv_obj_set_size(wl, 15, 11);
+    lv_obj_set_pos(wl, 1, 0);
+    lv_obj_set_style_radius(wl, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(wl, lv_color_hex(0xCFEFEF), 0);
+    lv_obj_set_style_bg_opa(wl, LV_OPA_60, 0);
+
+    lv_obj_t *wr = lv_obj_create(bee);
+    lv_obj_remove_style_all(wr);
+    lv_obj_set_size(wr, 15, 11);
+    lv_obj_set_pos(wr, 18, 0);
+    lv_obj_set_style_radius(wr, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(wr, lv_color_hex(0xCFEFEF), 0);
+    lv_obj_set_style_bg_opa(wr, LV_OPA_60, 0);
+
+    lv_obj_t *body = lv_obj_create(bee);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, 22, 24);
+    lv_obj_set_pos(body, 6, 6);
+    lv_obj_set_style_radius(body, 11, 0);
+    lv_obj_set_style_bg_color(body, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *s = lv_obj_create(bee);
+        lv_obj_remove_style_all(s);
+        lv_obj_set_size(s, 22, 3);
+        lv_obj_set_pos(s, 6, 12 + i * 6);
+        lv_obj_set_style_bg_color(s, lv_color_hex(HC_STRIPE), 0);
+        lv_obj_set_style_bg_opa(s, LV_OPA_COVER, 0);
+    }
+}
+
+static lv_obj_t *status_chip(lv_obj_t *parent, const char *label, const char *val, uint32_t vcol)
+{
+    lv_obj_t *chip = lv_obj_create(parent);
+    lv_obj_remove_style_all(chip);
+    lv_obj_set_size(chip, 92, 44);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(chip, 10, 0);
+    lv_obj_set_style_border_color(chip, lv_color_hex(0x2A2213), 0);
+    lv_obj_set_style_border_width(chip, 1, 0);
+    lv_obj_set_style_pad_all(chip, 4, 0);
+
+    lv_obj_t *l = lv_label_create(chip);
+    lv_label_set_text(l, label);
+    lv_obj_set_style_text_color(l, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t *v = lv_label_create(chip);
+    lv_label_set_text(v, val);
+    lv_obj_set_style_text_color(v, lv_color_hex(vcol), 0);
+    lv_obj_align(v, LV_ALIGN_BOTTOM_MID, 0, 0);
+    return v;
+}
+
 #endif /* HAVE_LVGL */
 
 esp_err_t hc_ui_init(void *lv_display)
 {
     if (!lv_display) { ESP_LOGW(TAG, "headless UI"); return ESP_OK; }
 #if HAVE_LVGL
-    if (!bsp_display_lock(500)) return ESP_FAIL;
+    if (!bsp_display_lock(1000)) return ESP_FAIL;
 
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(HC_BG), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
 
-    /* Header */
-    lv_obj_t *hdr = panel(scr, HC_YELLOW);
-    lv_obj_set_width(hdr, lv_pct(94));
-    lv_obj_set_height(hdr, LV_SIZE_CONTENT);
-    lv_obj_align(hdr, LV_ALIGN_TOP_MID, 0, 16);
-    lv_obj_t *title = label(hdr, "// HONEYCOMB", HC_YELLOW);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_t *sub = label(hdr, "M5STACK TAB5  \xC2\xB7  802.15.4 EXPLORER", HC_CYAN);
-    lv_obj_align_to(sub, title, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 6);
+    /* --- pannable comb --- */
+    lv_obj_t *cont = bare(scr);
+    lv_obj_set_size(cont, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(cont, LV_DIR_ALL);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_OFF);
 
-    /* Status panel */
-    lv_obj_t *st = panel(scr, HC_CYAN);
-    lv_obj_set_width(st, lv_pct(94));
-    lv_obj_set_height(st, LV_SIZE_CONTENT);
-    lv_obj_align_to(st, hdr, LV_ALIGN_OUT_BOTTOM_MID, 0, 16);
+    lv_obj_t *field = bare(cont);
+    lv_obj_set_size(field, COMB_OX * 2 + COMB_COLS * HEX_AX + HEX_W / 4,
+                           COMB_OY + COMB_ROWS * HEX_AY + HEX_H);
 
-    label(st, "SYSTEM", HC_DIM);
-    lv_obj_t *d = label(st, "DISPLAY .......... ONLINE", HC_YELLOW);
-    lv_obj_align(d, LV_ALIGN_TOP_LEFT, 0, 24);
-    s_mode_lbl = label(st, "C6 RADIO ......... OFFLINE", HC_MAGENTA);
-    lv_obj_align_to(s_mode_lbl, d, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 6);
-    s_frames_lbl = label(st, "FRAMES ........... 0", HC_CYAN);
-    lv_obj_align_to(s_frames_lbl, s_mode_lbl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 6);
+    for (int c = 0; c < COMB_COLS; c++) {
+        for (int r = 0; r < COMB_ROWS; r++) {
+            int x = COMB_OX + c * HEX_AX;
+            int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
+            const hc_tile_t *t = find_tile(c, r);
 
-    /* Footer hint */
-    lv_obj_t *foot = label(scr, "awaiting C6 \xC2\xB7 flash via M5 downloader", HC_DIM);
-    lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, -16);
+            lv_obj_t *cell = bare(field);
+            lv_obj_set_pos(cell, x, y);
+            lv_obj_set_size(cell, HEX_W, HEX_H);
+
+            lv_obj_t *hex = lv_line_create(cell);
+            lv_line_set_points(hex, HEXP, 7);
+            lv_obj_set_style_line_color(hex, lv_color_hex(t ? t->line_color : HC_DIMLINE), 0);
+            lv_obj_set_style_line_width(hex, t ? 3 : 2, 0);
+            lv_obj_set_style_line_rounded(hex, true, 0);
+
+            if (t) {
+                lv_obj_t *ic = lv_label_create(cell);
+                lv_label_set_text(ic, t->icon);
+                lv_obj_set_style_text_color(ic, lv_color_hex(t->line_color), 0);
+                lv_obj_align(ic, LV_ALIGN_CENTER, 0, -14);
+
+                lv_obj_t *nm = lv_label_create(cell);
+                lv_label_set_text(nm, t->name);
+                lv_obj_set_style_text_color(nm, lv_color_hex(t->text_color), 0);
+                lv_obj_align(nm, LV_ALIGN_CENTER, 0, 14);
+            }
+        }
+    }
+
+    /* --- pinned header (on top of the comb) --- */
+    lv_obj_t *hdr = bare(scr);
+    lv_obj_set_size(hdr, LV_PCT(100), HDR_H);
+    lv_obj_set_style_bg_color(hdr, lv_color_hex(HC_HDR), 0);
+    lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_left(hdr, 14, 0);
+    lv_obj_set_style_pad_right(hdr, 14, 0);
+
+    build_bee(hdr);
+    lv_obj_t *bee_anchor = lv_obj_get_child(hdr, 0);
+    lv_obj_align(bee_anchor, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *title = lv_label_create(hdr);
+    lv_label_set_text(title, "honeycomb");
+    lv_obj_set_style_text_color(title, lv_color_hex(HC_HONEY), 0);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 44, -9);
+
+    lv_obj_t *sub = lv_label_create(hdr);
+    lv_label_set_text(sub, "TAB5 \xC2\xB7 802.15.4 EXPLORER");
+    lv_obj_set_style_text_color(sub, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(sub, LV_ALIGN_LEFT_MID, 44, 11);
+
+    lv_obj_t *frames_chip = status_chip(hdr, "FRAMES", "0", HC_CYAN);
+    lv_obj_align(lv_obj_get_parent(frames_chip), LV_ALIGN_RIGHT_MID, 0, 0);
+    s_frames_lbl = frames_chip;
+
+    lv_obj_t *c6_chip = status_chip(hdr, "C6 RADIO", "waiting", HC_AMBER);
+    lv_obj_align(lv_obj_get_parent(c6_chip), LV_ALIGN_RIGHT_MID, -100, 0);
+    s_mode_lbl = c6_chip;
 
     bsp_display_unlock();
     s_active = true;
-    ESP_LOGI(TAG, "cyberpunk UI up");
+    ESP_LOGI(TAG, "honeycomb UI up");
 #endif
     return ESP_OK;
 }
@@ -116,8 +259,8 @@ void hc_ui_add_frame(const hc_dissected_t *row)
     if (!s_active || !row) return;
     s_frame_count++;
     if (bsp_display_lock(50)) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "FRAMES ........... %lu", (unsigned long)s_frame_count);
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)s_frame_count);
         lv_label_set_text(s_frames_lbl, buf);
         bsp_display_unlock();
     }
@@ -133,13 +276,11 @@ void hc_ui_set_mode(hc_radio_mode_t mode, bool ok)
 {
 #if HAVE_LVGL
     if (!s_active) return;
-    const char *n = mode == HC_MODE_SNIFFER ? "SNIFFER" :
-                    mode == HC_MODE_WIFI ? "WIFI" : "IDLE";
+    const char *n = mode == HC_MODE_SNIFFER ? "sniffer" :
+                    mode == HC_MODE_WIFI ? "wifi" : "idle";
     if (bsp_display_lock(50)) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "C6 RADIO ......... %s", ok ? n : "FAIL");
-        lv_label_set_text(s_mode_lbl, buf);
-        lv_obj_set_style_text_color(s_mode_lbl, lv_color_hex(ok ? HC_YELLOW : HC_MAGENTA), 0);
+        lv_label_set_text(s_mode_lbl, ok ? n : "fail");
+        lv_obj_set_style_text_color(s_mode_lbl, lv_color_hex(ok ? HC_HONEY : HC_AMBER), 0);
         bsp_display_unlock();
     }
 #else
