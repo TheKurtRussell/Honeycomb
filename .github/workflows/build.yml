@@ -25,22 +25,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Upgrade idf-component-manager before building. The version bundled in the
+      # v5.5 image aborts dependency resolution when an optional dependency's `if`
+      # clause references a Kconfig symbol that lives in a not-yet-downloaded
+      # component (LVGL's LV_USE_FREETYPE, pulled via the Tab5 BSP):
+      #   MissingKconfigError: LV_USE_FREETYPE
+      # Newer managers treat the unknown symbol as unset instead of erroring.
+      # PIP_CONSTRAINT is cleared so IDF's pinned constraint doesn't block it.
       - name: Build ${{ matrix.name }}
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5
           target: ${{ matrix.target }}
           path: ${{ matrix.path }}
-
-      - name: Dump esp-serial-flasher API (debug)
-        if: always()
-        run: |
-          echo "===== all esp-serial-flasher header names ====="
-          find ${{ matrix.path }} -path '*esp-serial-flasher*' -name '*.h' 2>/dev/null || true
-          echo "===== cat all PORT headers ====="
-          find ${{ matrix.path }} -path '*esp-serial-flasher*' -path '*port*' -name '*.h' -exec cat {} + 2>/dev/null || true
-          echo "===== esp_loader_flash_cfg_t region ====="
-          find ${{ matrix.path }} -path '*esp-serial-flasher*' -name 'esp_loader.h' -exec sed -n '130,150p' {} + 2>/dev/null || true
+          command: "PIP_CONSTRAINT= pip install -U idf-component-manager && idf.py build"
 
       - name: Merge ${{ matrix.name }} image
         run: |
@@ -48,7 +46,7 @@ jobs:
           cd ${{ matrix.path }}/build
           esptool.py --chip ${{ matrix.target }} merge_bin \
             -o ../../merged-${{ matrix.name }}.bin \
-            --fill-flash-size 16MB @flash_args
+            @flash_args
           ls -la ../../merged-${{ matrix.name }}.bin
 
       - name: Upload ${{ matrix.name }} binary
