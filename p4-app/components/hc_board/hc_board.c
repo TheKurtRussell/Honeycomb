@@ -45,6 +45,7 @@ esp_err_t hc_board_init(void)
 esp_err_t hc_board_power_read(int *mv, int *ma)
 {
     /* TODO: read INA226 @ 0x41 over the Tab5 I2C bus. */
-    if (mv) *mv = 0; if (ma) *ma = 0;
+    if (mv) *mv = 0;
+    if (ma) *ma = 0;
     return ESP_ERR_NOT_SUPPORTED;
 }

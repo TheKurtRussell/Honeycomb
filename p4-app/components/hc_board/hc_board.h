@@ -15,16 +15,19 @@
 extern "C" {
 #endif
 
-/* ---- P4 <-> C6 SDIO2 bus (per M5 Tab5 pin map) --------------------------- */
-/* D0..D3 / CMD / CK on G8..G13; RESET + IO2 on G14/G15. */
-#define HC_PIN_C6_SDIO_D0    8
-#define HC_PIN_C6_SDIO_D1    9
-#define HC_PIN_C6_SDIO_D2    10
-#define HC_PIN_C6_SDIO_D3    11
-#define HC_PIN_C6_SDIO_CMD   12
-#define HC_PIN_C6_SDIO_CLK   13
-#define HC_PIN_C6_RESET      15   /* VERIFY: C6 EN/RESET line */
-#define HC_PIN_C6_IO2        14
+/* ---- P4 <-> C6 SDIO2 bus ------------------------------------------------- */
+/* Authoritative pinmap, cross-checked against the M5 Tab5 docs AND the ESPHome
+ * esp32_hosted config for this board:
+ *   CLK=G12  CMD=G13  D0=G11  D1=G10  D2=G9  D3=G8   RESET=G15  IO2=G14
+ * (An earlier revision of this file had the data lines reversed — fixed.) */
+#define HC_PIN_C6_SDIO_CLK   12
+#define HC_PIN_C6_SDIO_CMD   13
+#define HC_PIN_C6_SDIO_D0    11
+#define HC_PIN_C6_SDIO_D1    10
+#define HC_PIN_C6_SDIO_D2    9
+#define HC_PIN_C6_SDIO_D3    8
+#define HC_PIN_C6_RESET      15   /* C6 EN/RESET, P4-controlled */
+#define HC_PIN_C6_IO2        14   /* C6 strap line; candidate BOOT pin for SDIO download (TEST) */
 
 /* ---- microSD (SDMMC) — see hc_storage.c; pins reported as G39..G44 -------- */
 
