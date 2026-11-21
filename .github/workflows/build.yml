@@ -25,20 +25,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Upgrade idf-component-manager before building. The version bundled in the
-      # v5.5 image aborts dependency resolution when an optional dependency's `if`
-      # clause references a Kconfig symbol that lives in a not-yet-downloaded
-      # component (LVGL's LV_USE_FREETYPE, pulled via the Tab5 BSP):
+      # The idf-component-manager bundled in the v5.5 image (2.2.2) aborts
+      # dependency resolution when an optional dependency's `if` clause references
+      # a Kconfig symbol that lives in a not-yet-downloaded component (LVGL's
+      # LV_USE_FREETYPE, pulled via the Tab5 BSP):
       #   MissingKconfigError: LV_USE_FREETYPE
-      # Newer managers treat the unknown symbol as unset instead of erroring.
-      # PIP_CONSTRAINT is cleared so IDF's pinned constraint doesn't block it.
+      # Manager 3.x fixes this, but IDF 5.5 pins `idf-component-manager~=2.2` in
+      # its own requirements and refuses to run with 3.x. There is no 2.x release
+      # with the fix, so we install 3.x AND relax that one pin so idf.py's startup
+      # dependency check accepts it. (PIP_CONSTRAINT is cleared so IDF's pinned
+      # constraint file doesn't block the upgrade.)
       - name: Build ${{ matrix.name }}
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5
           target: ${{ matrix.target }}
           path: ${{ matrix.path }}
-          command: "PIP_CONSTRAINT= pip install -U idf-component-manager && idf.py build"
+          command: "PIP_CONSTRAINT= pip install -U idf-component-manager && sed -i 's/^idf-component-manager.*/idf-component-manager/' /opt/esp/idf/tools/requirements/requirements.core.txt && idf.py build"
 
       - name: Merge ${{ matrix.name }} image
         run: |
