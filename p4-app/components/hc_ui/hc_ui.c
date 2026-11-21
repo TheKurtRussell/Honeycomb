@@ -22,6 +22,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_app_desc.h"
+#include "esp_random.h"
 
 #if __has_include("bsp/esp-bsp.h")
 #include "lvgl.h"
@@ -60,6 +61,9 @@ static bool s_active;
 #define COMB_OY (HDR_H + 12)
 #define COMB_COLS 15
 #define COMB_ROWS 8
+/* Hidden "buzz" game lives behind this unlabeled cell (pan right to find it). */
+#define SECRET_COL 11
+#define SECRET_ROW 2
 
 /* One shared outline shape; every cell reuses it (relative points). */
 static const lv_point_precise_t HEXP[] = {
@@ -305,6 +309,151 @@ static void tile_click_cb(lv_event_t *e)
     }
 }
 
+/* ---- hidden "buzz" mini-game: flap the bee through the comb ---- */
+#define BEE_X   320
+#define BEE_SZ  38
+#define PIPEW   100
+#define GAPH    250
+#define GSPEED  7
+#define GRAV    1
+#define FLAPV   (-15)
+#define NPIPE   3
+#define GAME_W  1280
+#define GAME_H  720
+
+static lv_obj_t *s_bee;
+static lv_obj_t *s_ptop[NPIPE], *s_pbot[NPIPE];
+static int  s_pipex[NPIPE], s_pipegap[NPIPE];
+static bool s_scored[NPIPE];
+static int  s_bee_y, s_bee_vy, s_score;
+static bool s_game_over;
+static lv_obj_t *s_score_lbl, *s_over_lbl;
+
+static void game_place_pipe(int i)
+{
+    s_pipegap[i] = 150 + (int)(esp_random() % 320);
+    lv_obj_set_pos(s_ptop[i], s_pipex[i], 0);
+    lv_obj_set_size(s_ptop[i], PIPEW, s_pipegap[i] - GAPH / 2);
+    lv_obj_set_pos(s_pbot[i], s_pipex[i], s_pipegap[i] + GAPH / 2);
+    lv_obj_set_size(s_pbot[i], PIPEW, GAME_H - (s_pipegap[i] + GAPH / 2));
+}
+
+static void game_reset(void)
+{
+    s_bee_y = GAME_H / 2;
+    s_bee_vy = 0;
+    s_score = 0;
+    s_game_over = false;
+    for (int i = 0; i < NPIPE; i++) {
+        s_pipex[i] = GAME_W + 120 + i * 440;
+        s_scored[i] = false;
+        game_place_pipe(i);
+    }
+    lv_obj_set_pos(s_bee, BEE_X, s_bee_y);
+    lv_label_set_text(s_score_lbl, "0");
+    lv_obj_add_flag(s_over_lbl, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void game_tick(lv_timer_t *t)
+{
+    (void)t;
+    if (s_game_over) return;
+
+    s_bee_vy += GRAV;
+    if (s_bee_vy > 22) s_bee_vy = 22;
+    s_bee_y += s_bee_vy;
+    lv_obj_set_y(s_bee, s_bee_y);
+
+    for (int i = 0; i < NPIPE; i++) {
+        s_pipex[i] -= GSPEED;
+        if (s_pipex[i] < -PIPEW) {
+            int maxx = 0;
+            for (int j = 0; j < NPIPE; j++) if (s_pipex[j] > maxx) maxx = s_pipex[j];
+            s_pipex[i] = maxx + 440;
+            s_scored[i] = false;
+            game_place_pipe(i);
+        } else {
+            lv_obj_set_x(s_ptop[i], s_pipex[i]);
+            lv_obj_set_x(s_pbot[i], s_pipex[i]);
+        }
+        if (!s_scored[i] && s_pipex[i] + PIPEW < BEE_X) {
+            s_scored[i] = true;
+            s_score++;
+            char b[8];
+            snprintf(b, sizeof(b), "%d", s_score);
+            lv_label_set_text(s_score_lbl, b);
+        }
+        if (BEE_X + BEE_SZ > s_pipex[i] && BEE_X < s_pipex[i] + PIPEW) {
+            if (s_bee_y < s_pipegap[i] - GAPH / 2 || s_bee_y + BEE_SZ > s_pipegap[i] + GAPH / 2)
+                s_game_over = true;
+        }
+    }
+    if (s_bee_y < 0 || s_bee_y + BEE_SZ > GAME_H) s_game_over = true;
+
+    if (s_game_over) {
+        char b[48];
+        snprintf(b, sizeof(b), "game over\nscore %d\ntap to retry", s_score);
+        lv_label_set_text(s_over_lbl, b);
+        lv_obj_remove_flag(s_over_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void game_flap(lv_event_t *e)
+{
+    (void)e;
+    if (s_game_over) game_reset();
+    else s_bee_vy = FLAPV;
+}
+
+static void open_game(void)
+{
+    lv_obj_t *ov = tool_shell("buzz");
+    lv_obj_add_event_cb(ov, game_flap, LV_EVENT_CLICKED, NULL);
+
+    for (int i = 0; i < NPIPE; i++) {
+        s_ptop[i] = lv_obj_create(ov);
+        lv_obj_remove_style_all(s_ptop[i]);
+        lv_obj_set_style_bg_color(s_ptop[i], lv_color_hex(HC_PANEL), 0);
+        lv_obj_set_style_bg_opa(s_ptop[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(s_ptop[i], lv_color_hex(HC_HONEY), 0);
+        lv_obj_set_style_border_width(s_ptop[i], 2, 0);
+        s_pbot[i] = lv_obj_create(ov);
+        lv_obj_remove_style_all(s_pbot[i]);
+        lv_obj_set_style_bg_color(s_pbot[i], lv_color_hex(HC_PANEL), 0);
+        lv_obj_set_style_bg_opa(s_pbot[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(s_pbot[i], lv_color_hex(HC_HONEY), 0);
+        lv_obj_set_style_border_width(s_pbot[i], 2, 0);
+    }
+
+    s_bee = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_bee);
+    lv_obj_set_size(s_bee, BEE_SZ, BEE_SZ);
+    lv_obj_set_style_radius(s_bee, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_bee, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_bg_opa(s_bee, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_bee, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_border_width(s_bee, 3, 0);
+
+    s_score_lbl = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_score_lbl, lv_color_hex(HC_HONEY), 0);
+    lv_obj_align(s_score_lbl, LV_ALIGN_TOP_MID, 0, 22);
+
+    s_over_lbl = lv_label_create(ov);
+    lv_obj_set_style_text_align(s_over_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_over_lbl, lv_color_hex(HC_CYAN), 0);
+    lv_obj_center(s_over_lbl);
+
+    game_reset();
+    s_tool_timer = lv_timer_create(game_tick, 30, NULL);
+}
+
+static void game_click_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_overlay) return;
+    open_game();
+}
+
 #endif /* HAVE_LVGL */
 
 esp_err_t hc_ui_init(void *lv_display)
@@ -362,6 +511,15 @@ esp_err_t hc_ui_init(void *lv_display)
                 lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
                 lv_obj_add_event_cb(cell, tile_click_cb, LV_EVENT_CLICKED,
                                     (void *)(intptr_t)t->id);
+            } else if (c == SECRET_COL && r == SECRET_ROW) {
+                /* hidden game cell: a faint honey tint + dot as the only hint */
+                lv_obj_set_style_line_color(hex, lv_color_hex(0x7A6322), 0);
+                lv_obj_t *dot = lv_label_create(cell);
+                lv_label_set_text(dot, ".");
+                lv_obj_set_style_text_color(dot, lv_color_hex(HC_HONEY), 0);
+                lv_obj_center(dot);
+                lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_add_event_cb(cell, game_click_cb, LV_EVENT_CLICKED, NULL);
             }
         }
     }
