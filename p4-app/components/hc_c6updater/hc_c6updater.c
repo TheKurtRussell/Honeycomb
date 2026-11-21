@@ -35,7 +35,7 @@
 
 #if __has_include("esp_loader.h")
 #include "esp_loader.h"
-#include "esp_loader_io.h"
+#include "esp32_sdio_port.h"   /* esp32_sdio_port_t, esp32_sdio_ops, SDIO_4BIT */
 #define HAVE_SERIAL_FLASHER 1
 #else
 #define HAVE_SERIAL_FLASHER 0
@@ -92,23 +92,23 @@ esp_err_t hc_c6updater_run(const char *sd_path, hc_c6upd_progress_cb_t cb, void 
     ESP_LOGI(TAG, "flashing C6 from %s (%ld bytes) over SDIO", path, size);
     if (cb) cb(0, "connecting to C6 (SDIO)", ctx);
 
-    /* TODO(api): confirm these struct/function names against the pinned
-     * esp-serial-flasher v2 port header (port/esp32_port.h). The shape below
-     * follows the v2 handle-based API and the esp32_sdio_example. */
+    /* Real esp-serial-flasher v2 SDIO port (from esp32_sdio_port.h). */
     esp_loader_t loader;
-    loader_esp32_sdio_config_t sdio = {
-        .clk  = HC_PIN_C6_SDIO_CLK,   /* G12 */
-        .cmd  = HC_PIN_C6_SDIO_CMD,   /* G13 */
-        .d0   = HC_PIN_C6_SDIO_D0,    /* G11 */
-        .d1   = HC_PIN_C6_SDIO_D1,    /* G10 */
-        .d2   = HC_PIN_C6_SDIO_D2,    /* G9  */
-        .d3   = HC_PIN_C6_SDIO_D3,    /* G8  */
-        .reset_trigger_pin = HC_PIN_C6_RESET, /* G15 */
-        .boot_pin          = HC_PIN_C6_IO2,   /* G14 — the pin under test */
-        .freq_khz = 400,              /* start slow for download mode */
-        .slot = 1,
+    esp32_sdio_port_t sdio = {
+        .port.ops     = &esp32_sdio_ops,
+        .slot         = SDMMC_HOST_SLOT_1,
+        .max_freq_khz = 400,                 /* slow for download bring-up */
+        .sdio_clk_pin = HC_PIN_C6_SDIO_CLK,  /* G12 */
+        .sdio_cmd_pin = HC_PIN_C6_SDIO_CMD,  /* G13 */
+        .sdio_d0_pin  = HC_PIN_C6_SDIO_D0,   /* G11 */
+        .sdio_d1_pin  = HC_PIN_C6_SDIO_D1,   /* G10 */
+        .sdio_d2_pin  = HC_PIN_C6_SDIO_D2,   /* G9  */
+        .sdio_d3_pin  = HC_PIN_C6_SDIO_D3,   /* G8  */
+        .reset_pin    = HC_PIN_C6_RESET,     /* G15 */
+        .boot_pin     = HC_PIN_C6_IO2,       /* G14 — TEST: C6 boot strap candidate */
+        .bus_width    = SDIO_4BIT,
     };
-    if (esp_loader_init_sdio(&loader, &sdio) != ESP_LOADER_SUCCESS) {
+    if (esp_loader_init_sdio(&loader, &sdio.port) != ESP_LOADER_SUCCESS) {
         fclose(f); if (cb) cb(-1, "SDIO init failed", ctx); return ESP_FAIL;
     }
 
@@ -124,8 +124,10 @@ esp_err_t hc_c6updater_run(const char *sd_path, hc_c6upd_progress_cb_t cb, void 
     ESP_LOGI(TAG, "connected to C6");
     if (cb) cb(5, "connected, writing", ctx);
 
+    /* offset + image_size must be 4-byte aligned (esp_loader_flash_cfg_t). */
+    uint32_t aligned = ((uint32_t)size + 3u) & ~3u;
     esp_loader_flash_cfg_t fcfg = {
-        .offset = 0, .image_size = (uint32_t)size, .block_size = FLASH_CHUNK,
+        .offset = 0, .image_size = aligned, .block_size = FLASH_CHUNK,
     };
     esp_err_t ret = ESP_OK;
     if (esp_loader_flash_start(&loader, &fcfg) != ESP_LOADER_SUCCESS) {
@@ -133,8 +135,9 @@ esp_err_t hc_c6updater_run(const char *sd_path, hc_c6upd_progress_cb_t cb, void 
     } else {
         uint8_t buf[FLASH_CHUNK]; long done = 0; size_t r;
         while ((r = fread(buf, 1, sizeof(buf), f)) > 0) {
-            /* v2 signature: flash_write(handle, &flash_cfg, data, len) */
-            if (esp_loader_flash_write(&loader, &fcfg, buf, r) != ESP_LOADER_SUCCESS) {
+            uint32_t wlen = (uint32_t)r;
+            while (wlen & 3u) buf[wlen++] = 0xFF;   /* pad last block to 4 bytes */
+            if (esp_loader_flash_write(&loader, &fcfg, buf, wlen) != ESP_LOADER_SUCCESS) {
                 ret = ESP_FAIL; if (cb) cb(-1, "flash_write failed", ctx); break;
             }
             done += r;
