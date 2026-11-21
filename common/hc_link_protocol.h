@@ -19,6 +19,7 @@
 #define HC_LINK_PROTOCOL_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
