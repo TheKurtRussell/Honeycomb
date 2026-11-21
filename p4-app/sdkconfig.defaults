@@ -21,8 +21,20 @@ CONFIG_FREERTOS_HZ=1000
 # --- Display: MIPI-DSI panel via m5stack_tab5 BSP + esp_lvgl_port ---
 # Some IDF builds gate the P4 MIPI-DSI LCD driver behind experimental features.
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
-# LVGL draw buffers are large (1280x720) — keep them in PSRAM.
-CONFIG_LV_MEM_CUSTOM=y
+
+# LVGL (v9) is pulled in transitively by the BSP. Its component manifest gates
+# optional image/font dependencies on these Kconfig symbols, which must be
+# defined at dependency-solve time or the solver aborts:
+#   MissingKconfigError: LV_USE_FREETYPE
+# We use only the built-in widgets + fonts, so disable them all.
+CONFIG_LV_USE_FREETYPE=n
+CONFIG_LV_USE_THORVG=n
+CONFIG_LV_USE_LODEPNG=n
+CONFIG_LV_USE_LIBPNG=n
+CONFIG_LV_USE_FFMPEG=n
+CONFIG_LV_USE_RLOTTIE=n
+CONFIG_LV_USE_TINY_TTF=n
+# Panel is RGB565.
 CONFIG_LV_COLOR_DEPTH_16=y
 
 # --- USB host (flasher) ---
