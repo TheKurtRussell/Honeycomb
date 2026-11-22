@@ -43,6 +43,18 @@ jobs:
           path: ${{ matrix.path }}
           command: "PIP_CONSTRAINT= pip install -U idf-component-manager && sed -i 's/^idf-component-manager.*/idf-component-manager/' /opt/esp/idf/tools/requirements/requirements.core.txt && idf.py build"
 
+      # TEMP debug: print esp_hosted / esp_wifi_remote Kconfig so we can set the
+      # Tab5 SDIO pins with the exact symbol names. Remove once pins are wired.
+      - name: Dump ESP-Hosted Kconfig (debug)
+        if: always() && matrix.name == 'p4'
+        run: |
+          for pat in esp_hosted esp_wifi_remote; do
+            find ${{ matrix.path }} -path "*${pat}*" -name 'Kconfig*' 2>/dev/null | while read f; do
+              echo "===== $f ====="
+              grep -niE 'sdio|gpio|_pin|_clk|_cmd|_d[0-3]\b|reset|cherryusb|host_interface|slave_target|^[[:space:]]*config ' "$f" | head -150
+            done
+          done
+
       - name: Merge ${{ matrix.name }} image
         run: |
           python -m pip install --quiet esptool
