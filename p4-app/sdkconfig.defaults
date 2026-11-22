@@ -58,6 +58,18 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_SERIAL_FLASHER_INTERFACE_SDIO=y
 CONFIG_SERIAL_FLASHER_PORT_SDIO=y
 
-# NOTE: esp_hosted (WIFI mode) adds its own required options on first
-# `idf.py reconfigure`; choose the C6 slave target under
-# Component config -> Wi-Fi Remote -> choose slave target = ESP32-C6.
+# --- Wi-Fi via ESP-Hosted: C6 slave over SDIO (Tab5) ---
+# esp_wifi_remote forwards esp_wifi to the C6; esp_hosted carries it over the
+# C6's dedicated SDIO bus (separate from the microSD). Slave target = ESP32-C6.
+# Tab5 SDIO pins: CLK 12 / CMD 13 / D0 11 / D1 10 / D2 9 / D3 8, reset GPIO15
+# active-low. Several symbol spellings are listed; unknown keys are ignored.
+CONFIG_ESP_WIFI_REMOTE_ENABLED=y
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET_ESP32C6=y
+CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET="esp32c6"
+CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+CONFIG_ESP_HOSTED_SPI_HOST_INTERFACE=n
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
+# Keep the optional CherryUSB host-transport manifest gate off (SDIO only), or
+# the dependency solve aborts with MissingKconfigError on the USB manifest.
+CONFIG_ESP_HOSTED_HOST_USB_CHERRYUSB_MANIFEST=n

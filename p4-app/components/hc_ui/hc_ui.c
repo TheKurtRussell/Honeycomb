@@ -182,6 +182,8 @@ static lv_obj_t *status_chip(lv_obj_t *parent, const char *label, const char *va
 
 /* ---- tool views: tap a tile -> full-screen overlay with a back button ---- */
 static lv_obj_t  *s_overlay;
+static lv_obj_t  *s_comb;        /* the pannable comb container (freed while a tool is open) */
+static lv_obj_t  *s_scr;         /* active screen, for rebuilding the comb */
 static bool       s_tool_pending;
 static lv_timer_t *s_tool_timer;
 static lv_obj_t  *s_dash_psram;
@@ -202,6 +204,103 @@ static char       s_flash_path[HC_PATH_MAX];
 static char       s_bin_paths[12][HC_PATH_MAX];
 static uint32_t   s_cur_baud = 115200;
 
+static void tile_click_cb(lv_event_t *e);
+static void game_click_cb(lv_event_t *e);
+
+/* Build (or rebuild) the pannable comb as a child of the screen. Kept in one
+ * place so it can be torn down while a tool overlay is open (freeing the LVGL
+ * pool for that overlay) and recreated on close. Caller holds the display lock. */
+static void build_comb(void)
+{
+    if (s_comb) return;
+    s_scr = lv_screen_active();
+
+    lv_obj_t *cont = bare(s_scr);
+    s_comb = cont;
+    lv_obj_set_size(cont, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(cont, LV_DIR_ALL);
+    lv_obj_set_scroll_snap_x(cont, LV_SCROLL_SNAP_NONE);
+    lv_obj_set_scroll_snap_y(cont, LV_SCROLL_SNAP_NONE);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *field = bare(cont);
+    lv_obj_set_size(field, COMB_OX * 2 + COMB_COLS * HEX_AX + HEX_W / 4,
+                           COMB_OY + COMB_ROWS * HEX_AY + HEX_H);
+
+    /* Pass 1 — decorative cells (dim hex outline, no wrapper, square caps). */
+    for (int c = 0; c < COMB_COLS; c++) {
+        for (int r = 0; r < COMB_ROWS; r++) {
+            if (find_tile(c, r) || (c == SECRET_COL && r == SECRET_ROW)) continue;
+            int x = COMB_OX + c * HEX_AX;
+            int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
+            lv_obj_t *hex = lv_line_create(field);
+            lv_obj_set_pos(hex, x, y);
+            lv_line_set_points(hex, HEXP, 7);
+            lv_obj_set_style_line_color(hex, lv_color_hex(HC_DIMLINE), 0);
+            lv_obj_set_style_line_width(hex, 2, 0);
+            lv_obj_set_style_line_rounded(hex, false, 0);
+        }
+    }
+
+    /* Pass 2 — interactive tiles on top, so their colored outline wins. */
+    for (int c = 0; c < COMB_COLS; c++) {
+        for (int r = 0; r < COMB_ROWS; r++) {
+            const hc_tile_t *t = find_tile(c, r);
+            bool secret = (c == SECRET_COL && r == SECRET_ROW);
+            if (!t && !secret) continue;
+            int x = COMB_OX + c * HEX_AX;
+            int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
+
+            lv_obj_t *cell = bare(field);
+            lv_obj_set_pos(cell, x, y);
+            lv_obj_set_size(cell, HEX_W, HEX_H);
+
+            lv_obj_t *hex = lv_line_create(cell);
+            lv_line_set_points(hex, HEXP, 7);
+            lv_obj_set_style_line_color(hex, lv_color_hex(t ? t->line_color : 0x7A6322), 0);
+            lv_obj_set_style_line_width(hex, t ? 3 : 2, 0);
+            lv_obj_set_style_line_rounded(hex, true, 0);
+
+            if (t) {
+                lv_obj_t *ic = lv_label_create(cell);
+                lv_label_set_text(ic, t->icon);
+                lv_obj_set_style_text_color(ic, lv_color_hex(t->line_color), 0);
+                lv_obj_align(ic, LV_ALIGN_CENTER, 0, -14);
+
+                lv_obj_t *nm = lv_label_create(cell);
+                lv_label_set_text(nm, t->name);
+                lv_obj_set_style_text_color(nm, lv_color_hex(t->text_color), 0);
+                lv_obj_align(nm, LV_ALIGN_CENTER, 0, 14);
+
+                lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_add_event_cb(cell, tile_click_cb, LV_EVENT_CLICKED,
+                                    (void *)(intptr_t)t->id);
+            } else {
+                lv_obj_t *dot = lv_label_create(cell);
+                lv_label_set_text(dot, ".");
+                lv_obj_set_style_text_color(dot, lv_color_hex(HC_HONEY), 0);
+                lv_obj_center(dot);
+                lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_add_event_cb(cell, game_click_cb, LV_EVENT_CLICKED, NULL);
+            }
+        }
+    }
+
+    lv_obj_move_background(cont);   /* keep the comb below the pinned header */
+
+    /* Center the view so the comb extends in every direction from the start. */
+    lv_obj_update_layout(s_scr);
+    int vw = lv_obj_get_width(cont),  vh = lv_obj_get_height(cont);
+    int fw = lv_obj_get_width(field), fh = lv_obj_get_height(field);
+    int sx = (fw - vw) / 2, sy = (fh - vh) / 2;
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+    lv_obj_scroll_to(cont, sx, sy, LV_ANIM_OFF);
+}
+
+static void rebuild_comb_async(void *p) { (void)p; build_comb(); }
+
 static void close_tool(lv_event_t *e)
 {
     (void)e;
@@ -216,10 +315,16 @@ static void close_tool(lv_event_t *e)
     s_baud_row = NULL;
     s_fb_list = s_fb_pathlbl = NULL;
     s_tool_pending = false;
+    lv_async_call(rebuild_comb_async, NULL);   /* bring the comb back (after the event) */
 }
 
 static lv_obj_t *tool_shell(const char *title)
 {
+    /* Free the comb so this overlay has the whole LVGL pool. Safe to delete
+     * now — tool_shell is only reached from lv_async (not inside an event).
+     * The comb is rebuilt by close_tool when the overlay closes. */
+    if (s_comb) { lv_obj_delete(s_comb); s_comb = NULL; }
+
     s_overlay = lv_obj_create(lv_screen_active());
     lv_obj_remove_style_all(s_overlay);
     lv_obj_set_size(s_overlay, LV_PCT(100), LV_PCT(100));
@@ -923,85 +1028,9 @@ esp_err_t hc_ui_init(void *lv_display)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
 
-    /* --- pannable comb --- */
-    lv_obj_t *cont = bare(scr);
-    lv_obj_set_size(cont, LV_PCT(100), LV_PCT(100));
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(cont, LV_DIR_ALL);
-    lv_obj_set_scroll_snap_x(cont, LV_SCROLL_SNAP_NONE);
-    lv_obj_set_scroll_snap_y(cont, LV_SCROLL_SNAP_NONE);
-    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_OFF);
-
-    lv_obj_t *field = bare(cont);
-    lv_obj_set_size(field, COMB_OX * 2 + COMB_COLS * HEX_AX + HEX_W / 4,
-                           COMB_OY + COMB_ROWS * HEX_AY + HEX_H);
-
-    /* Pass 1 — decorative cells: just a dim hex outline drawn straight onto the
-     * field with no wrapper object. That halves the comb's object count (keeps
-     * the LVGL pool from filling up) and, with no rounded caps, keeps the comb
-     * repaint cheap when returning from a tool (fast "Back"). These are drawn
-     * FIRST so the colored interactive tiles in pass 2 overdraw the shared
-     * edges — otherwise a neighbour's dim line paints over a tile's bottom. */
-    for (int c = 0; c < COMB_COLS; c++) {
-        for (int r = 0; r < COMB_ROWS; r++) {
-            if (find_tile(c, r) || (c == SECRET_COL && r == SECRET_ROW)) continue;
-            int x = COMB_OX + c * HEX_AX;
-            int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
-            lv_obj_t *hex = lv_line_create(field);
-            lv_obj_set_pos(hex, x, y);
-            lv_line_set_points(hex, HEXP, 7);
-            lv_obj_set_style_line_color(hex, lv_color_hex(HC_DIMLINE), 0);
-            lv_obj_set_style_line_width(hex, 2, 0);
-            lv_obj_set_style_line_rounded(hex, false, 0);
-        }
-    }
-
-    /* Pass 2 — interactive cells on top, so their colored outline wins every
-     * shared edge. Each gets a wrapper for its click area and centered labels. */
-    for (int c = 0; c < COMB_COLS; c++) {
-        for (int r = 0; r < COMB_ROWS; r++) {
-            const hc_tile_t *t = find_tile(c, r);
-            bool secret = (c == SECRET_COL && r == SECRET_ROW);
-            if (!t && !secret) continue;
-            int x = COMB_OX + c * HEX_AX;
-            int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
-
-            lv_obj_t *cell = bare(field);
-            lv_obj_set_pos(cell, x, y);
-            lv_obj_set_size(cell, HEX_W, HEX_H);
-
-            lv_obj_t *hex = lv_line_create(cell);
-            lv_line_set_points(hex, HEXP, 7);
-            lv_obj_set_style_line_color(hex, lv_color_hex(t ? t->line_color : 0x7A6322), 0);
-            lv_obj_set_style_line_width(hex, t ? 3 : 2, 0);
-            lv_obj_set_style_line_rounded(hex, true, 0);
-
-            if (t) {
-                lv_obj_t *ic = lv_label_create(cell);
-                lv_label_set_text(ic, t->icon);
-                lv_obj_set_style_text_color(ic, lv_color_hex(t->line_color), 0);
-                lv_obj_align(ic, LV_ALIGN_CENTER, 0, -14);
-
-                lv_obj_t *nm = lv_label_create(cell);
-                lv_label_set_text(nm, t->name);
-                lv_obj_set_style_text_color(nm, lv_color_hex(t->text_color), 0);
-                lv_obj_align(nm, LV_ALIGN_CENTER, 0, 14);
-
-                /* tappable: a short tap opens the tool, a drag still pans */
-                lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
-                lv_obj_add_event_cb(cell, tile_click_cb, LV_EVENT_CLICKED,
-                                    (void *)(intptr_t)t->id);
-            } else {
-                /* hidden game cell: a faint honey tint + dot as the only hint */
-                lv_obj_t *dot = lv_label_create(cell);
-                lv_label_set_text(dot, ".");
-                lv_obj_set_style_text_color(dot, lv_color_hex(HC_HONEY), 0);
-                lv_obj_center(dot);
-                lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
-                lv_obj_add_event_cb(cell, game_click_cb, LV_EVENT_CLICKED, NULL);
-            }
-        }
-    }
+    /* --- pannable comb (built as its own container so it can be freed while a
+     * tool overlay is open, then rebuilt on close) --- */
+    build_comb();
 
     /* --- pinned header (on top of the comb) --- */
     lv_obj_t *hdr = bare(scr);
@@ -1032,15 +1061,6 @@ esp_err_t hc_ui_init(void *lv_display)
     lv_obj_t *c6_chip = status_chip(hdr, "C6 RADIO", "waiting", HC_AMBER);
     lv_obj_align(lv_obj_get_parent(c6_chip), LV_ALIGN_RIGHT_MID, -100, 0);
     s_mode_lbl = c6_chip;
-
-    /* Start centered so the comb extends in every direction from the first view. */
-    lv_obj_update_layout(scr);
-    int vw = lv_obj_get_width(cont),  vh = lv_obj_get_height(cont);
-    int fw = lv_obj_get_width(field), fh = lv_obj_get_height(field);
-    int sx = (fw - vw) / 2, sy = (fh - vh) / 2;
-    if (sx < 0) sx = 0;
-    if (sy < 0) sy = 0;
-    lv_obj_scroll_to(cont, sx, sy, LV_ANIM_OFF);
 
     bsp_display_unlock();
     s_active = true;
