@@ -539,32 +539,35 @@ esp_err_t hc_ui_init(void *lv_display)
     lv_obj_set_size(field, COMB_OX * 2 + COMB_COLS * HEX_AX + HEX_W / 4,
                            COMB_OY + COMB_ROWS * HEX_AY + HEX_H);
 
+    /* Pass 1 — decorative cells: just a dim hex outline drawn straight onto the
+     * field with no wrapper object. That halves the comb's object count (keeps
+     * the LVGL pool from filling up) and, with no rounded caps, keeps the comb
+     * repaint cheap when returning from a tool (fast "Back"). These are drawn
+     * FIRST so the colored interactive tiles in pass 2 overdraw the shared
+     * edges — otherwise a neighbour's dim line paints over a tile's bottom. */
     for (int c = 0; c < COMB_COLS; c++) {
         for (int r = 0; r < COMB_ROWS; r++) {
+            if (find_tile(c, r) || (c == SECRET_COL && r == SECRET_ROW)) continue;
             int x = COMB_OX + c * HEX_AX;
             int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
+            lv_obj_t *hex = lv_line_create(field);
+            lv_obj_set_pos(hex, x, y);
+            lv_line_set_points(hex, HEXP, 7);
+            lv_obj_set_style_line_color(hex, lv_color_hex(HC_DIMLINE), 0);
+            lv_obj_set_style_line_width(hex, 2, 0);
+            lv_obj_set_style_line_rounded(hex, false, 0);
+        }
+    }
+
+    /* Pass 2 — interactive cells on top, so their colored outline wins every
+     * shared edge. Each gets a wrapper for its click area and centered labels. */
+    for (int c = 0; c < COMB_COLS; c++) {
+        for (int r = 0; r < COMB_ROWS; r++) {
             const hc_tile_t *t = find_tile(c, r);
             bool secret = (c == SECRET_COL && r == SECRET_ROW);
-
-            /* Decorative cells (the vast majority) are just a dim hex outline.
-             * Draw the line straight onto the field with no wrapper object —
-             * that halves the comb's object count and keeps the LVGL pool from
-             * filling up, which otherwise makes a heavy overlay's allocations
-             * fail. Only interactive cells get a wrapper for their click area
-             * and centered labels. */
-            if (!t && !secret) {
-                lv_obj_t *hex = lv_line_create(field);
-                lv_obj_set_pos(hex, x, y);
-                lv_line_set_points(hex, HEXP, 7);
-                lv_obj_set_style_line_color(hex, lv_color_hex(HC_DIMLINE), 0);
-                lv_obj_set_style_line_width(hex, 2, 0);
-                /* No rounded caps on decorative cells: rounding makes LVGL fill
-                 * a circle at every one of the 7 points, and with ~110 cells
-                 * that dominates the comb repaint when returning from a tool
-                 * (the slow "Back"). Square joins look the same at this size. */
-                lv_obj_set_style_line_rounded(hex, false, 0);
-                continue;
-            }
+            if (!t && !secret) continue;
+            int x = COMB_OX + c * HEX_AX;
+            int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
 
             lv_obj_t *cell = bare(field);
             lv_obj_set_pos(cell, x, y);

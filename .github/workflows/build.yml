@@ -91,5 +91,15 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+      # actions/deploy-pages intermittently fails to see its own just-uploaded
+      # artifact ("Fetching artifact metadata failed … re-run at a later time").
+      # It's a transient GitHub-side issue, so retry once before failing the run.
       - id: deploy
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - name: Retry Pages deploy if the first attempt flaked
+        if: steps.deploy.outcome == 'failure'
+        run: sleep 20
+      - id: deploy_retry
+        if: steps.deploy.outcome == 'failure'
         uses: actions/deploy-pages@v4
