@@ -16,6 +16,7 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
+#include "driver/gpio.h"
 
 #define TAG "hc_store"
 #define MOUNT_POINT "/sdcard"
@@ -51,18 +52,29 @@ esp_err_t hc_storage_mount(void)
         .allocation_unit_size = 16 * 1024,
     };
     sdmmc_card_t *card;
+
+    /* Tab5 microSD on the P4's SDMMC. On ESP32-P4 the SD card is on SDMMC
+     * SLOT 0; the on-board ESP32-C6 uses SLOT 1 of the same controller for
+     * ESP-Hosted. Pinning the SD to slot 0 explicitly (with the Tab5's
+     * GPIO-matrix pins CLK=43 CMD=44 D0-3=39-42) keeps it clear of the C6 so
+     * both can share the one SDMMC controller once Wi-Fi is enabled. This is
+     * the config from Espressif's mcu_hosted_sdio_sdmmc_combined example. */
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.slot = SDMMC_HOST_SLOT_0;
+
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
-    /* Tab5 SD: set the data width your wiring supports. Start with 1-bit for
-     * reliability during bring-up, move to 4-bit for throughput later. */
-    slot.width = 1;
+    slot.width = 1;              /* 1-bit for reliability during bring-up */
+    slot.clk = GPIO_NUM_43;
+    slot.cmd = GPIO_NUM_44;
+    slot.d0  = GPIO_NUM_39;
+    slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
     esp_err_t e = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot, &mcfg, &card);
     if (e != ESP_OK) { ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(e)); return e; }
 
     mkdir(CAP_DIR, 0775);
     s_mounted = true;
-    ESP_LOGI(TAG, "SD mounted");
+    ESP_LOGI(TAG, "SD mounted (slot 0, 1-bit, CLK43/CMD44/D0=39)");
     return ESP_OK;
 }
 bool hc_storage_is_mounted(void) { return s_mounted; }
