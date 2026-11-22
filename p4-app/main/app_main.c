@@ -57,17 +57,14 @@ void app_main(void)
     esp_err_t e = hc_mode_manager_start(on_mode, NULL);
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "C6 link not up (%s)", esp_err_to_name(e));
-        /* First-boot path: if the C6 didn't answer but a C6 image is on the SD
-         * card, flash it (this is how the C6 gets its firmware without a USB
-         * pass-through). After flashing, re-try the link. */
-        if (hc_c6updater_should_offer(false, NULL)) {
-            ESP_LOGI(TAG, "C6 image found on SD — flashing C6");
-            if (hc_c6updater_run(NULL, NULL, NULL) == ESP_OK) {
-                e = hc_mode_manager_start(on_mode, NULL);
-            }
-        }
-        if (e != ESP_OK)
-            ESP_LOGW(TAG, "continuing without C6 — flasher/UI still usable");
+        /* The SDIO C6-flash path (Plan A) is DISABLED. The C6 BOOT strap can't
+         * be driven over SDIO, so it never connects — and its failed SDIO
+         * attempt tears down the shared SDMMC host, which then makes every
+         * later SD access (serial-log Save, flash-from-SD file list) assert in
+         * the SD driver (xQueueSemaphoreTake on a NULL mutex). Flash the C6 via
+         * the M5 ESP32 downloader instead (docs/flashing.md Plan B). The P4
+         * flasher / serial bench / UI all run fine without the C6. */
+        ESP_LOGW(TAG, "continuing without C6 — flash it via the M5 downloader (Plan B)");
     }
 
     ESP_LOGI(TAG, "ready");
