@@ -16,6 +16,7 @@
  */
 #include "hc_flasher.h"
 #include "hc_esp_loader.h"
+#include "hc_board.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -174,11 +175,13 @@ esp_err_t hc_flasher_start(void) {
         else report(HC_FL_IDLE, HC_TGT_UNKNOWN, 0, 0, "waiting for a board…");
         return ESP_OK;
     }
-    usb_host_config_t hc = { .skip_phy_setup = false, .intr_flags = ESP_INTR_FLAG_LEVEL1 };
-    esp_err_t e = usb_host_install(&hc);
+    /* Power the USB-A port AND install the host stack via the BSP. The port's
+     * 5 V is off at boot (USB5V_EN on the 0x44 IO expander), so without this a
+     * plugged-in board never powers up or enumerates. */
+    esp_err_t e = hc_board_usb_host_start();
     if (e != ESP_OK) {
-        ESP_LOGE(TAG, "usb_host_install: %s", esp_err_to_name(e));
-        report(HC_FL_ERROR, HC_TGT_UNKNOWN, 0, 0, "USB host install failed");
+        ESP_LOGE(TAG, "hc_board_usb_host_start: %s", esp_err_to_name(e));
+        report(HC_FL_ERROR, HC_TGT_UNKNOWN, 0, 0, "USB host start failed");
         return e;
     }
     xTaskCreate(usb_lib_task, "usb_lib", 4096, NULL, 10, NULL);

@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "hc_flasher.c" "hc_esp_loader.c"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES freertos usb
+    PRIV_REQUIRES freertos usb hc_board
 )
 target_include_directories(${COMPONENT_LIB} PUBLIC "${CMAKE_SOURCE_DIR}/../common")
 # Phase 2 (USB host transport): the managed components are pulled in via

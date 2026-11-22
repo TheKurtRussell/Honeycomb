@@ -46,6 +46,13 @@ void hc_board_c6_reset(void);
  * Handy to show runtime on the status bar. */
 esp_err_t hc_board_power_read(int *mv, int *ma);
 
+/* USB-A host port. The port's 5 V is OFF by default — it's gated by the
+ * USB5V_EN line on the PI4IOE5V6408 IO expander (0x44 P3). bsp_usb_host_start()
+ * flips that switch AND installs the USB host stack; without it a plugged-in
+ * device never powers up or enumerates. Call before registering a USB client. */
+esp_err_t hc_board_usb_host_start(void);
+esp_err_t hc_board_usb_host_stop(void);
+
 #ifdef __cplusplus
 }
 #endif

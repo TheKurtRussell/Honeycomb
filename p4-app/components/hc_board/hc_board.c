@@ -65,3 +65,18 @@ esp_err_t hc_board_power_read(int *mv, int *ma)
     if (ma) *ma = 0;
     return ESP_ERR_NOT_SUPPORTED;
 }
+
+esp_err_t hc_board_usb_host_start(void)
+{
+    /* Powers the USB-A port (USB5V_EN via the 0x44 IO expander) and installs the
+     * USB host stack. USB_DEV mode = the board supplies 5 V to the plugged-in
+     * device; limit_500mA = true keeps the load switch inside spec. */
+    esp_err_t e = bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, true);
+    ESP_LOGI(TAG, "USB-A host power %s", e == ESP_OK ? "on" : esp_err_to_name(e));
+    return e;
+}
+
+esp_err_t hc_board_usb_host_stop(void)
+{
+    return bsp_usb_host_stop();
+}
