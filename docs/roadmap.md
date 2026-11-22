@@ -87,3 +87,34 @@ the C++ esp_usb::VCP umbrella — there is no pure-C open API. Plan:
    Enable C++ exceptions? No — keep -fno-exceptions; VCP works without.
 Deferred (not built blind): the VCP C++ API couldn't be verified offline, and
 shipping it untested risked the working native-USB bench.
+
+## C6 radio (Wi-Fi/BLE/802.15.4) via ESP-Hosted — BLOCKED on SDMMC coexistence
+
+Phase 1 (bring Wi-Fi up on the factory C6 slave via esp_wifi_remote + esp_hosted
+over SDIO) got **the mechanism and pins exactly right** but boot-loops the board.
+Reverted in the app for now; the known-good config is kept commented in
+sdkconfig.defaults / main/idf_component.yml for the next attempt.
+
+What the 5b19639 boot log proved:
+- The esp_hosted Tab5 board profile (ESP32P4_TAB5_C6_BOARD) works: transport
+  came up `SDIO 4-bit 40000 kHz CLK=12 CMD=13 D0=11 D1=10 D2=9 D3=8 RESET=15`,
+  C6 reset fired on GPIO15. No pin guessing needed.
+
+Two problems to solve before re-enabling:
+1. **SDMMC controller is shared.** The C6 SDIO and the microSD both sit on the
+   P4's one SDMMC host. esp_hosted inits that host very early (before app_main),
+   so when hc_storage later mounts the microSD it hits
+   `SDMMC host already initialized, skipping init flow` and the SD init times out
+   (`sdmmc_card_init failed 0x107`). The SD-mount failure then trips
+   `assert(xQueueSemaphoreTake ... pxQueue)` -> panic -> **boot loop**. M5's own
+   stack runs C6 Wi-Fi and the SD together, so this is an init-ordering/shared-
+   host problem, not a hardware limit. Fix direction: drive one SDMMC host and
+   add each slot (slot 0 = SD, slot 1 = C6) explicitly, or mount the SD before
+   esp_hosted claims the host; and make hc_storage mount failure non-fatal
+   (never assert) as belt-and-braces.
+2. **C6 didn't answer SDIO** (`send_op_cond 0x107` on the C6 slot too). Likely
+   the factory slave (ESP32C6-WiFi-SDIO-Interface-V1.4.1) not matching this newer
+   esp_hosted host, and/or WLAN_PWR_EN on the 0x44 IO expander not asserted
+   before probe. This is the anticipated Phase-2 trigger: reflash the C6 over
+   SDIO (shadowlab tab5-p4-c6-sdio-ota, no downloader kit) with a matching —
+   eventually sniff-capable — slave.

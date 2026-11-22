@@ -58,14 +58,15 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_SERIAL_FLASHER_INTERFACE_SDIO=y
 CONFIG_SERIAL_FLASHER_PORT_SDIO=y
 
-# --- Wi-Fi/BLE via ESP-Hosted: C6 slave over SDIO (Tab5) ---
-# esp_wifi_remote forwards esp_wifi to the C6; esp_hosted carries it over the
-# C6's dedicated SDIO bus (separate from the microSD). esp_hosted ships a Tab5
-# board profile (ESP32P4_TAB5_C6_BOARD) that sets every SDIO pin automatically:
-# CLK 12 / CMD 13 / D0 11 / D1 10 / D2 9 / D3 8 and reset GPIO15. So we only
-# select: wifi-remote on + the HOSTED library + CP(slave)=C6 + the Tab5 board.
-CONFIG_ESP_WIFI_REMOTE_ENABLED=y
-CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
-CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
-CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
-CONFIG_ESP32P4_TAB5_C6_BOARD=y
+# --- Wi-Fi/BLE via ESP-Hosted (C6 over SDIO): TEMPORARILY REVERTED ---
+# The Tab5 board profile (ESP32P4_TAB5_C6_BOARD) brought the SDIO transport up
+# with the right pins (CLK 12 / CMD 13 / D0 11 / D1 10 / D2 9 / D3 8, reset
+# GPIO15), but ESP-Hosted claims the P4's SDMMC controller, which the microSD
+# shares on this board -> SD mount fails -> assert -> boot loop. Re-enable only
+# once C6/SD SDMMC coexistence is handled (see docs/roadmap.md). Kept here as the
+# known-good config for that next attempt:
+#   CONFIG_ESP_WIFI_REMOTE_ENABLED=y
+#   CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
+#   CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+#   CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
+#   CONFIG_ESP32P4_TAB5_C6_BOARD=y
