@@ -76,6 +76,18 @@ jobs:
           cp -r webflasher/* _site/
           cp _artifacts/honeycomb-p4/merged-p4.bin _site/merged-p4.bin
           cp _artifacts/honeycomb-c6/merged-c6.bin _site/merged-c6.bin
+          # Cache-bust: the firmware and manifest have fixed names, so browsers
+          # and the Pages CDN happily serve a stale merged-p4.bin after a new
+          # build (you flash, nothing changes, same crash). Stamp the short
+          # commit SHA into the firmware URL and the manifest reference so every
+          # build fetches a unique, uncacheable path. Also surface the SHA as the
+          # manifest version so it shows in the flasher UI.
+          SHA="${GITHUB_SHA::7}"
+          echo "Stamping build $SHA into flasher"
+          sed -i "s|merged-p4.bin|merged-p4.bin?v=$SHA|g" _site/manifest-p4.json
+          sed -i "s|\"version\": \"[^\"]*\"|\"version\": \"$SHA\"|" _site/manifest-p4.json
+          sed -i "s|manifest=\"manifest-p4.json\"|manifest=\"manifest-p4.json?v=$SHA\"|g" _site/index.html
+          echo "--- manifest-p4.json ---"; cat _site/manifest-p4.json
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
