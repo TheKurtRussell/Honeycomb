@@ -359,6 +359,19 @@ static void flash_task(void *arg)
     (void)arg;
     hc_flasher_monitor_stop();
     vTaskDelay(pdMS_TO_TICKS(200));      /* let the monitor task release the link */
+
+    /* Don't flash until a serial device is fully open — flashing into a
+     * half-open CDC handle faults. Wait briefly in case the open is in flight. */
+    int waited = 0;
+    while (!hc_flasher_is_ready() && waited < 3000) { vTaskDelay(pdMS_TO_TICKS(100)); waited += 100; }
+    if (!hc_flasher_is_ready()) {
+        hc_ui_log("no serial device open — plug a board in first");
+        hc_flasher_monitor_start(s_cur_baud, bench_line, NULL);
+        s_flash_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
     hc_flash_region_t region = { .offset = 0 };
     strncpy(region.sd_path, s_flash_path, sizeof(region.sd_path) - 1);
     hc_flasher_write(&region, 1);        /* blocks; reports progress via the cb */

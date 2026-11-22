@@ -80,6 +80,10 @@ typedef void (*hc_serial_line_cb_t)(const char *line, void *ctx);
 esp_err_t hc_flasher_monitor_start(uint32_t baud, hc_serial_line_cb_t cb, void *ctx);
 esp_err_t hc_flasher_monitor_stop(void);
 
+/* True once a USB serial (CDC) device is fully open — flashing before this is a
+ * race that can fault, so the Bench waits on it. */
+bool hc_flasher_is_ready(void);
+
 const char *hc_target_chip_name(hc_target_chip_t c);
 
 #ifdef __cplusplus

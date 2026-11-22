@@ -51,6 +51,7 @@ static bool                   s_usb_jtag_target;  /* set during detect */
 static cdc_acm_dev_hdl_t    s_cdc;
 static StreamBufferHandle_t s_rx;          /* device -> host byte stream */
 static uint32_t             s_baud = 115200;
+static volatile bool        s_cdc_ready;   /* true only once a device is fully open */
 #else
 #define HC_HAVE_CDC 0
 #endif
@@ -172,6 +173,7 @@ static bool cdc_rx_cb(const uint8_t *data, size_t len, void *arg) {
 static void cdc_event_cb(const cdc_acm_host_dev_event_data_t *ev, void *arg) {
     (void)arg;
     if (ev->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
+        s_cdc_ready = false;
         if (s_cdc) { cdc_acm_host_close(s_cdc); s_cdc = NULL; }
         report(HC_FL_IDLE, HC_TGT_UNKNOWN, 0, 0, "device unplugged");
     }
@@ -197,6 +199,7 @@ static void cdc_open_task(void *arg) {
                                          .bParityType = 0, .bDataBits = 8 };
             cdc_acm_host_line_coding_set(s_cdc, &lc);
             cdc_acm_host_set_control_line_state(s_cdc, false, false);  /* let it run */
+            s_cdc_ready = true;        /* fully open — safe to flash/monitor now */
             char m[48];
             snprintf(m, sizeof(m), "serial open @ %lu baud", (unsigned long)s_baud);
             report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, m);
@@ -310,10 +313,13 @@ esp_err_t hc_flasher_start(void) {
 }
 
 esp_err_t hc_flasher_detect(hc_target_chip_t *chip_out) {
+    ESP_LOGI(TAG, "detect: entering download mode (usb_jtag=%d)", s_usb_jtag_target);
     hc_loader_enter_download_mode(s_usb_jtag_target);
     vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_LOGI(TAG, "detect: syncing");
     if (hc_loader_sync() != ESP_OK) { report(HC_FL_ERROR, HC_TGT_UNKNOWN,0,0,"no sync"); return ESP_ERR_TIMEOUT; }
 
+    ESP_LOGI(TAG, "detect: reading chip magic");
     uint32_t magic = 0;
     hc_loader_read_reg(CHIP_MAGIC_REG, &magic);
     hc_target_chip_t chip = magic_to_chip(magic);
@@ -386,3 +392,12 @@ esp_err_t hc_flasher_monitor_start(uint32_t baud, hc_serial_line_cb_t cb, void *
            ? ESP_OK : ESP_ERR_NO_MEM;
 }
 esp_err_t hc_flasher_monitor_stop(void) { s_mon_run = false; return ESP_OK; }
+
+bool hc_flasher_is_ready(void)
+{
+#if HC_HAVE_CDC
+    return s_cdc_ready;
+#else
+    return false;
+#endif
+}
