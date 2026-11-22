@@ -448,6 +448,13 @@ static void flash_pick_cb(lv_event_t *e)
     lv_async_call(async_flash_picker, NULL);
 }
 
+static void clear_log_cb(lv_event_t *e)
+{
+    (void)e;
+    s_log_buf[0] = 0; s_log_len = 0;
+    if (s_bench_log) lv_label_set_text(s_bench_log, "(cleared)");
+}
+
 static void open_bench(void)
 {
     lv_obj_t *ov = tool_shell("usb bench");
@@ -462,6 +469,19 @@ static void open_bench(void)
     lv_obj_set_style_text_color(fbl, lv_color_hex(HC_BG), 0);
     lv_obj_center(fbl);
     lv_obj_add_event_cb(flash_btn, flash_pick_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *clear_btn = lv_button_create(ov);
+    lv_obj_set_size(clear_btn, 90, 40);
+    lv_obj_align(clear_btn, LV_ALIGN_TOP_RIGHT, -210, 16);
+    lv_obj_set_style_bg_color(clear_btn, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(clear_btn, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(clear_btn, 1, 0);
+    lv_obj_set_style_radius(clear_btn, 10, 0);
+    lv_obj_t *cbl = lv_label_create(clear_btn);
+    lv_label_set_text(cbl, "clear");
+    lv_obj_set_style_text_color(cbl, lv_color_hex(HC_LCYAN), 0);
+    lv_obj_center(cbl);
+    lv_obj_add_event_cb(clear_btn, clear_log_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *hint = lv_label_create(ov);
     lv_label_set_text(hint, "USB-A serial monitor");

@@ -65,3 +65,25 @@ new mode, new opcodes, same link and UI shell.
 - WiGLE-style CSV export alongside pcap (needs GPS — out of scope without a
   module, but the capture records carry everything except location).
 - Save/replay a capture back out the radio for testing.
+
+## USB serial bench — status & next step (bridges)
+Done: USB-A power (bsp_usb_host_start / USB5V_EN), host bring-up, device
+enumeration (VID/PID/class), CDC-ACM serial monitor with a scrolling log and a
+baud selector (9600/115200/230400/921600), and flash-from-SD (pick a .bin,
+stop monitor, enter download mode, hc_flasher_write at 0x0 with a progress bar,
+resume monitor). Works for **native-USB** ESP targets (VID 0x303A: S3/C3/C6/
+C5/P4/H2) — confirmed on a Cardputer ADV (303A:1001) and XIAO ESP32-C5.
+
+Next: **USB-serial bridge chips** (CP210x, CH34x, FTDI) for classic DevKits.
+The esp bridge drivers (usb_host_cp210x_vcp / ch34x_vcp / ftdi_vcp) are built on
+the C++ esp_usb::VCP umbrella — there is no pure-C open API. Plan:
+1. Add a small C++ shim (hc_vcp.cpp, extern "C") exposing: hc_vcp_open_any(rx_cb)
+   using esp_usb::VCP::open_from_new_dev(), plus tx / line_coding_set /
+   set_control_line_state wrappers.
+2. Route hc_flasher's transport through hc_vcp instead of calling cdc_acm_host
+   directly (VCP already handles native CDC too, so it can replace the cdc_acm
+   path rather than run beside it — avoids two drivers claiming one device).
+3. Deps to add: espressif/usb_host_vcp + the three bridge vcp components.
+   Enable C++ exceptions? No — keep -fno-exceptions; VCP works without.
+Deferred (not built blind): the VCP C++ API couldn't be verified offline, and
+shipping it untested risked the working native-USB bench.
