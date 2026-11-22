@@ -64,9 +64,6 @@ static bool s_active;
 #define COMB_OY (HDR_H + 12)
 #define COMB_COLS 15
 #define COMB_ROWS 8
-/* Hidden "buzz" game lives behind this unlabeled cell (pan right to find it). */
-#define SECRET_COL 11
-#define SECRET_ROW 2
 
 /* One shared outline shape; every cell reuses it (relative points). */
 static const lv_point_precise_t HEXP[] = {
@@ -206,7 +203,6 @@ static char       s_bin_paths[12][HC_PATH_MAX];
 static uint32_t   s_cur_baud = 115200;
 
 static void tile_click_cb(lv_event_t *e);
-static void game_click_cb(lv_event_t *e);
 
 /* Build (or rebuild) the pannable comb as a child of the screen. Kept in one
  * place so it can be torn down while a tool overlay is open (freeing the LVGL
@@ -232,7 +228,7 @@ static void build_comb(void)
     /* Pass 1 — decorative cells (dim hex outline, no wrapper, square caps). */
     for (int c = 0; c < COMB_COLS; c++) {
         for (int r = 0; r < COMB_ROWS; r++) {
-            if (find_tile(c, r) || (c == SECRET_COL && r == SECRET_ROW)) continue;
+            if (find_tile(c, r)) continue;
             int x = COMB_OX + c * HEX_AX;
             int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
             lv_obj_t *hex = lv_line_create(field);
@@ -248,8 +244,7 @@ static void build_comb(void)
     for (int c = 0; c < COMB_COLS; c++) {
         for (int r = 0; r < COMB_ROWS; r++) {
             const hc_tile_t *t = find_tile(c, r);
-            bool secret = (c == SECRET_COL && r == SECRET_ROW);
-            if (!t && !secret) continue;
+            if (!t) continue;
             int x = COMB_OX + c * HEX_AX;
             int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
 
@@ -259,32 +254,23 @@ static void build_comb(void)
 
             lv_obj_t *hex = lv_line_create(cell);
             lv_line_set_points(hex, HEXP, 7);
-            lv_obj_set_style_line_color(hex, lv_color_hex(t ? t->line_color : 0x7A6322), 0);
-            lv_obj_set_style_line_width(hex, t ? 3 : 2, 0);
+            lv_obj_set_style_line_color(hex, lv_color_hex(t->line_color), 0);
+            lv_obj_set_style_line_width(hex, 3, 0);
             lv_obj_set_style_line_rounded(hex, true, 0);
 
-            if (t) {
-                lv_obj_t *ic = lv_label_create(cell);
-                lv_label_set_text(ic, t->icon);
-                lv_obj_set_style_text_color(ic, lv_color_hex(t->line_color), 0);
-                lv_obj_align(ic, LV_ALIGN_CENTER, 0, -14);
+            lv_obj_t *ic = lv_label_create(cell);
+            lv_label_set_text(ic, t->icon);
+            lv_obj_set_style_text_color(ic, lv_color_hex(t->line_color), 0);
+            lv_obj_align(ic, LV_ALIGN_CENTER, 0, -14);
 
-                lv_obj_t *nm = lv_label_create(cell);
-                lv_label_set_text(nm, t->name);
-                lv_obj_set_style_text_color(nm, lv_color_hex(t->text_color), 0);
-                lv_obj_align(nm, LV_ALIGN_CENTER, 0, 14);
+            lv_obj_t *nm = lv_label_create(cell);
+            lv_label_set_text(nm, t->name);
+            lv_obj_set_style_text_color(nm, lv_color_hex(t->text_color), 0);
+            lv_obj_align(nm, LV_ALIGN_CENTER, 0, 14);
 
-                lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
-                lv_obj_add_event_cb(cell, tile_click_cb, LV_EVENT_CLICKED,
-                                    (void *)(intptr_t)t->id);
-            } else {
-                lv_obj_t *dot = lv_label_create(cell);
-                lv_label_set_text(dot, ".");
-                lv_obj_set_style_text_color(dot, lv_color_hex(HC_HONEY), 0);
-                lv_obj_center(dot);
-                lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
-                lv_obj_add_event_cb(cell, game_click_cb, LV_EVENT_CLICKED, NULL);
-            }
+            lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(cell, tile_click_cb, LV_EVENT_CLICKED,
+                                (void *)(intptr_t)t->id);
         }
     }
 
@@ -838,201 +824,6 @@ static void tile_click_cb(lv_event_t *e)
     if (s_overlay || s_tool_pending) return;
     s_tool_pending = true;
     lv_async_call(async_open_tool, lv_event_get_user_data(e));
-}
-
-/* ---- hidden "buzz" mini-game: flap the bee through the comb ---- */
-#define BEE_X   320
-#define BEE_SZ  38
-#define PIPEW   100
-#define GAPH    250
-#define GSPEED  7
-#define GRAV    1
-#define FLAPV   (-15)
-#define NPIPE   3
-#define GAME_W  1280
-#define GAME_H  720
-
-static lv_obj_t *s_bee;
-static lv_obj_t *s_ptop[NPIPE], *s_pbot[NPIPE];
-static int  s_pipex[NPIPE], s_pipegap[NPIPE];
-static bool s_scored[NPIPE];
-static int  s_bee_y, s_bee_vy, s_score;
-static bool s_game_over;
-static lv_obj_t *s_score_lbl, *s_over_lbl;
-
-static void game_place_pipe(int i)
-{
-    s_pipegap[i] = 150 + (int)(esp_random() % 320);
-    lv_obj_set_pos(s_ptop[i], s_pipex[i], 0);
-    lv_obj_set_size(s_ptop[i], PIPEW, s_pipegap[i] - GAPH / 2);
-    lv_obj_set_pos(s_pbot[i], s_pipex[i], s_pipegap[i] + GAPH / 2);
-    lv_obj_set_size(s_pbot[i], PIPEW, GAME_H - (s_pipegap[i] + GAPH / 2));
-}
-
-static void game_reset(void)
-{
-    s_bee_y = GAME_H / 2;
-    s_bee_vy = 0;
-    s_score = 0;
-    s_game_over = false;
-    for (int i = 0; i < NPIPE; i++) {
-        s_pipex[i] = GAME_W + 120 + i * 440;
-        s_scored[i] = false;
-        game_place_pipe(i);
-    }
-    lv_obj_set_pos(s_bee, BEE_X, s_bee_y);
-    lv_label_set_text(s_score_lbl, "0");
-    lv_obj_add_flag(s_over_lbl, LV_OBJ_FLAG_HIDDEN);
-}
-
-static void game_tick(lv_timer_t *t)
-{
-    (void)t;
-    if (s_game_over) return;
-
-    s_bee_vy += GRAV;
-    if (s_bee_vy > 22) s_bee_vy = 22;
-    s_bee_y += s_bee_vy;
-    lv_obj_set_y(s_bee, s_bee_y);
-
-    for (int i = 0; i < NPIPE; i++) {
-        s_pipex[i] -= GSPEED;
-        if (s_pipex[i] < -PIPEW) {
-            int maxx = 0;
-            for (int j = 0; j < NPIPE; j++) if (s_pipex[j] > maxx) maxx = s_pipex[j];
-            s_pipex[i] = maxx + 440;
-            s_scored[i] = false;
-            game_place_pipe(i);
-        } else {
-            lv_obj_set_x(s_ptop[i], s_pipex[i]);
-            lv_obj_set_x(s_pbot[i], s_pipex[i]);
-        }
-        if (!s_scored[i] && s_pipex[i] + PIPEW < BEE_X) {
-            s_scored[i] = true;
-            s_score++;
-            char b[8];
-            snprintf(b, sizeof(b), "%d", s_score);
-            lv_label_set_text(s_score_lbl, b);
-        }
-        if (BEE_X + BEE_SZ > s_pipex[i] && BEE_X < s_pipex[i] + PIPEW) {
-            if (s_bee_y < s_pipegap[i] - GAPH / 2 || s_bee_y + BEE_SZ > s_pipegap[i] + GAPH / 2)
-                s_game_over = true;
-        }
-    }
-    if (s_bee_y < 0 || s_bee_y + BEE_SZ > GAME_H) s_game_over = true;
-
-    if (s_game_over) {
-        char b[48];
-        snprintf(b, sizeof(b), "game over\nscore %d\ntap to retry", s_score);
-        lv_label_set_text(s_over_lbl, b);
-        lv_obj_remove_flag(s_over_lbl, LV_OBJ_FLAG_HIDDEN);
-    }
-}
-
-static void game_flap(lv_event_t *e)
-{
-    (void)e;
-    if (s_game_over) game_reset();
-    else s_bee_vy = FLAPV;
-}
-
-static void open_game(void)
-{
-    /* The game is memory-heavy: free the comb so it has the whole LVGL pool. */
-    lv_obj_t *ov = tool_shell_ex("buzz", true);
-    lv_obj_add_event_cb(ov, game_flap, LV_EVENT_CLICKED, NULL);
-
-    for (int i = 0; i < NPIPE; i++) {
-        s_ptop[i] = lv_obj_create(ov);
-        lv_obj_remove_style_all(s_ptop[i]);
-        lv_obj_set_style_bg_color(s_ptop[i], lv_color_hex(HC_PANEL), 0);
-        lv_obj_set_style_bg_opa(s_ptop[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(s_ptop[i], lv_color_hex(HC_HONEY), 0);
-        lv_obj_set_style_border_width(s_ptop[i], 2, 0);
-        s_pbot[i] = lv_obj_create(ov);
-        lv_obj_remove_style_all(s_pbot[i]);
-        lv_obj_set_style_bg_color(s_pbot[i], lv_color_hex(HC_PANEL), 0);
-        lv_obj_set_style_bg_opa(s_pbot[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(s_pbot[i], lv_color_hex(HC_HONEY), 0);
-        lv_obj_set_style_border_width(s_pbot[i], 2, 0);
-    }
-
-    /* The player is an actual little bee (a container of parts), moved as one
-     * by repositioning the container each tick. */
-    s_bee = lv_obj_create(ov);
-    lv_obj_remove_style_all(s_bee);
-    lv_obj_set_size(s_bee, BEE_SZ, BEE_SZ);
-
-    lv_obj_t *wl = lv_obj_create(s_bee);
-    lv_obj_remove_style_all(wl);
-    lv_obj_set_size(wl, 17, 13);
-    lv_obj_set_pos(wl, 2, 1);
-    lv_obj_set_style_radius(wl, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(wl, lv_color_hex(0xCFEFEF), 0);
-    lv_obj_set_style_bg_opa(wl, LV_OPA_70, 0);
-
-    lv_obj_t *wr = lv_obj_create(s_bee);
-    lv_obj_remove_style_all(wr);
-    lv_obj_set_size(wr, 17, 13);
-    lv_obj_set_pos(wr, 19, 1);
-    lv_obj_set_style_radius(wr, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(wr, lv_color_hex(0xCFEFEF), 0);
-    lv_obj_set_style_bg_opa(wr, LV_OPA_70, 0);
-
-    lv_obj_t *body = lv_obj_create(s_bee);
-    lv_obj_remove_style_all(body);
-    lv_obj_set_size(body, 28, 22);
-    lv_obj_set_pos(body, 3, 9);
-    lv_obj_set_style_radius(body, 11, 0);
-    lv_obj_set_style_bg_color(body, lv_color_hex(HC_HONEY), 0);
-    lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(body, lv_color_hex(HC_STRIPE), 0);
-    lv_obj_set_style_border_width(body, 2, 0);
-
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t *st = lv_obj_create(s_bee);
-        lv_obj_remove_style_all(st);
-        lv_obj_set_size(st, 28, 3);
-        lv_obj_set_pos(st, 3, 15 + i * 6);
-        lv_obj_set_style_bg_color(st, lv_color_hex(HC_STRIPE), 0);
-        lv_obj_set_style_bg_opa(st, LV_OPA_COVER, 0);
-    }
-
-    lv_obj_t *head = lv_obj_create(s_bee);
-    lv_obj_remove_style_all(head);
-    lv_obj_set_size(head, 10, 10);
-    lv_obj_set_pos(head, 28, 15);
-    lv_obj_set_style_radius(head, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(head, lv_color_hex(HC_STRIPE), 0);
-    lv_obj_set_style_bg_opa(head, LV_OPA_COVER, 0);
-
-    s_score_lbl = lv_label_create(ov);
-    lv_obj_set_style_text_color(s_score_lbl, lv_color_hex(HC_HONEY), 0);
-    lv_obj_align(s_score_lbl, LV_ALIGN_TOP_MID, 0, 22);
-
-    s_over_lbl = lv_label_create(ov);
-    lv_obj_set_style_text_align(s_over_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_over_lbl, lv_color_hex(HC_CYAN), 0);
-    lv_obj_center(s_over_lbl);
-
-    game_reset();
-    s_tool_timer = lv_timer_create(game_tick, 30, NULL);
-}
-
-static void async_open_game(void *p)
-{
-    (void)p;
-    s_tool_pending = false;
-    if (s_overlay) return;
-    open_game();
-}
-
-static void game_click_cb(lv_event_t *e)
-{
-    (void)e;
-    if (s_overlay || s_tool_pending) return;
-    s_tool_pending = true;
-    lv_async_call(async_open_game, NULL);
 }
 
 #endif /* HAVE_LVGL */
