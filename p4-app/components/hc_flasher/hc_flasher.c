@@ -219,6 +219,9 @@ static void describe_device(usb_device_handle_t dev) {
              dd->idVendor, dd->idProduct, dd->bDeviceClass);
     ESP_LOGI(TAG, "USB device: %s", msg);
     report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, msg);
+    /* VID 0x303A == Espressif native USB-Serial-JTAG: selects the USB-JTAG
+     * download-mode reset sequence (vs the classic RTS/DTR one for bridges). */
+    s_usb_jtag_target = (dd->idVendor == 0x303A);
 #if HC_HAVE_CDC
     s_want_vid = dd->idVendor; s_want_pid = dd->idProduct;
 #endif

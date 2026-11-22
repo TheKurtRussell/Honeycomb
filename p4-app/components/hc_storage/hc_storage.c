@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
@@ -65,6 +66,42 @@ esp_err_t hc_storage_mount(void)
     return ESP_OK;
 }
 bool hc_storage_is_mounted(void) { return s_mounted; }
+
+static bool ends_with_bin(const char *name)
+{
+    size_t n = strlen(name);
+    if (n < 4) return false;
+    const char *e = name + n - 4;
+    return (e[0] == '.') &&
+           (e[1] == 'b' || e[1] == 'B') &&
+           (e[2] == 'i' || e[2] == 'I') &&
+           (e[3] == 'n' || e[3] == 'N');
+}
+
+static void scan_dir_for_bins(const char *dir, char (*paths)[HC_PATH_MAX],
+                              int max, int *n)
+{
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while (*n < max && (de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;        /* skip ., .., hidden */
+        if (!ends_with_bin(de->d_name)) continue;
+        snprintf(paths[*n], HC_PATH_MAX, "%s/%s", dir, de->d_name);
+        (*n)++;
+    }
+    closedir(d);
+}
+
+esp_err_t hc_storage_list_bins(char (*paths)[HC_PATH_MAX], int max, int *n)
+{
+    if (!paths || !n || max <= 0) return ESP_ERR_INVALID_ARG;
+    *n = 0;
+    if (!s_mounted) return ESP_ERR_INVALID_STATE;
+    scan_dir_for_bins(MOUNT_POINT, paths, max, n);
+    scan_dir_for_bins(CAP_DIR, paths, max, n);
+    return ESP_OK;
+}
 
 esp_err_t hc_storage_pcap_open(char *path_out, size_t cap)
 {

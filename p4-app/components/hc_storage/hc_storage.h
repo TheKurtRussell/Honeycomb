@@ -22,6 +22,11 @@ extern "C" {
 esp_err_t hc_storage_mount(void);
 bool      hc_storage_is_mounted(void);
 
+/* List up to `max` *.bin files on the SD (root and /honeycomb), newest-dir
+ * last. Fills full paths into paths[i] (each HC_PATH_MAX bytes). Count in *n. */
+#define HC_PATH_MAX 128
+esp_err_t hc_storage_list_bins(char (*paths)[HC_PATH_MAX], int max, int *n);
+
 /* pcap lifecycle. Open picks a fresh /sdcard/honeycomb/capNNN.pcap name and
  * returns it in path_out. */
 esp_err_t hc_storage_pcap_open(char *path_out, size_t path_cap);

@@ -13,6 +13,7 @@
  */
 #include "hc_ui.h"
 #include "hc_mode_manager.h"
+#include "hc_storage.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,8 @@
 #include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #if __has_include("bsp/esp-bsp.h")
 #include "lvgl.h"
@@ -186,18 +189,24 @@ static lv_obj_t  *s_dash_uptime;
 static lv_obj_t  *s_bench_status;
 static lv_obj_t  *s_bench_log;
 static lv_obj_t  *s_bench_logbox;
+static lv_obj_t  *s_bench_bar;
+static lv_obj_t  *s_flash_panel;
 static char       s_log_buf[2560];
 static size_t     s_log_len;
+static char       s_flash_path[HC_PATH_MAX];
+static char       s_bin_paths[12][HC_PATH_MAX];
 
 static void close_tool(lv_event_t *e)
 {
     (void)e;
     hc_flasher_monitor_stop();            /* harmless if no monitor is running */
     if (s_tool_timer) { lv_timer_delete(s_tool_timer); s_tool_timer = NULL; }
+    if (s_flash_panel){ lv_obj_delete_async(s_flash_panel); s_flash_panel = NULL; }
     if (s_overlay)    { lv_obj_delete_async(s_overlay); s_overlay = NULL; }
     s_dash_psram = s_dash_heap = s_dash_uptime = NULL;
     s_bench_status = NULL;
     s_bench_log = s_bench_logbox = NULL;
+    s_bench_bar = NULL;
     s_baud_row = NULL;
     s_tool_pending = false;
 }
@@ -340,9 +349,117 @@ static void baud_btn_cb(lv_event_t *e)
     hc_ui_log(m);
 }
 
+/* ---- flash from SD ---- */
+static TaskHandle_t s_flash_task;
+
+static void flash_task(void *arg)
+{
+    (void)arg;
+    hc_flasher_monitor_stop();
+    vTaskDelay(pdMS_TO_TICKS(200));      /* let the monitor task release the link */
+    hc_flash_region_t region = { .offset = 0 };
+    strncpy(region.sd_path, s_flash_path, sizeof(region.sd_path) - 1);
+    hc_flasher_write(&region, 1);        /* blocks; reports progress via the cb */
+    hc_flasher_monitor_start(115200, bench_line, NULL);  /* watch it boot */
+    s_flash_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void bin_pick_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    strncpy(s_flash_path, s_bin_paths[i], sizeof(s_flash_path) - 1);
+    s_flash_path[sizeof(s_flash_path) - 1] = 0;
+    if (s_flash_panel) { lv_obj_delete_async(s_flash_panel); s_flash_panel = NULL; }
+    if (s_bench_bar) { lv_obj_remove_flag(s_bench_bar, LV_OBJ_FLAG_HIDDEN);
+                       lv_bar_set_value(s_bench_bar, 0, LV_ANIM_OFF); }
+    if (s_bench_status) lv_label_set_text(s_bench_status, "flashing...");
+    if (!s_flash_task)
+        xTaskCreate(flash_task, "hc_flash", 6144, NULL, 6, &s_flash_task);
+}
+
+static void flash_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_flash_panel) { lv_obj_delete_async(s_flash_panel); s_flash_panel = NULL; }
+}
+
+/* Built from lv_async (never inside the triggering click) so we don't mutate the
+ * LVGL tree mid-event. */
+static void async_flash_picker(void *p)
+{
+    (void)p;
+    if (s_flash_panel || s_flash_task) return;
+
+    int n = 0;
+    hc_storage_list_bins(s_bin_paths, 12, &n);
+
+    s_flash_panel = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(s_flash_panel, 560, 560);
+    lv_obj_center(s_flash_panel);
+    lv_obj_set_style_bg_color(s_flash_panel, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_bg_opa(s_flash_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_flash_panel, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_border_width(s_flash_panel, 2, 0);
+    lv_obj_set_style_radius(s_flash_panel, 12, 0);
+    lv_obj_set_flex_flow(s_flash_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(s_flash_panel, 14, 0);
+    lv_obj_set_style_pad_row(s_flash_panel, 8, 0);
+
+    lv_obj_t *t = lv_label_create(s_flash_panel);
+    lv_label_set_text(t, "pick a .bin to flash at 0x0");
+    lv_obj_set_style_text_color(t, lv_color_hex(HC_HONEY), 0);
+
+    if (n == 0) {
+        lv_obj_t *none = lv_label_create(s_flash_panel);
+        lv_label_set_text(none, "no .bin files on SD\n(put one in /sdcard or /sdcard/honeycomb)");
+        lv_obj_set_style_text_color(none, lv_color_hex(HC_DIMTXT), 0);
+    } else {
+        for (int i = 0; i < n; i++) {
+            lv_obj_t *b = lv_button_create(s_flash_panel);
+            lv_obj_set_width(b, LV_PCT(100));
+            lv_obj_set_style_bg_color(b, lv_color_hex(HC_STRIPE), 0);
+            lv_obj_set_style_border_color(b, lv_color_hex(HC_HONEY), 0);
+            lv_obj_set_style_border_width(b, 1, 0);
+            lv_obj_t *bl = lv_label_create(b);
+            const char *base = strrchr(s_bin_paths[i], '/');
+            lv_label_set_text(bl, base ? base + 1 : s_bin_paths[i]);
+            lv_obj_set_style_text_color(bl, lv_color_hex(HC_LHONEY), 0);
+            lv_obj_add_event_cb(b, bin_pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        }
+    }
+
+    lv_obj_t *cancel = lv_button_create(s_flash_panel);
+    lv_obj_set_width(cancel, LV_PCT(100));
+    lv_obj_set_style_bg_color(cancel, lv_color_hex(HC_PANEL), 0);
+    lv_obj_t *cl = lv_label_create(cancel);
+    lv_label_set_text(cl, "cancel");
+    lv_obj_set_style_text_color(cl, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_center(cl);
+    lv_obj_add_event_cb(cancel, flash_cancel_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static void flash_pick_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_flash_panel || s_flash_task) return;
+    lv_async_call(async_flash_picker, NULL);
+}
+
 static void open_bench(void)
 {
     lv_obj_t *ov = tool_shell("usb bench");
+
+    lv_obj_t *flash_btn = lv_button_create(ov);
+    lv_obj_set_size(flash_btn, 190, 48);
+    lv_obj_align(flash_btn, LV_ALIGN_TOP_RIGHT, -14, 12);
+    lv_obj_set_style_bg_color(flash_btn, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_radius(flash_btn, 10, 0);
+    lv_obj_t *fbl = lv_label_create(flash_btn);
+    lv_label_set_text(fbl, LV_SYMBOL_UPLOAD "  flash from SD");
+    lv_obj_set_style_text_color(fbl, lv_color_hex(HC_BG), 0);
+    lv_obj_center(fbl);
+    lv_obj_add_event_cb(flash_btn, flash_pick_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *hint = lv_label_create(ov);
     lv_label_set_text(hint, "USB-A serial monitor");
@@ -355,6 +472,16 @@ static void open_bench(void)
     lv_obj_set_style_text_color(s_bench_status, lv_color_hex(HC_CYAN), 0);
     lv_label_set_text(s_bench_status, "starting USB host...");
     lv_obj_align(s_bench_status, LV_ALIGN_TOP_LEFT, 44, 128);
+
+    /* flash progress bar (hidden until a flash starts) */
+    s_bench_bar = lv_bar_create(ov);
+    lv_obj_set_size(s_bench_bar, LV_PCT(84), 10);
+    lv_obj_align(s_bench_bar, LV_ALIGN_TOP_LEFT, 44, 150);
+    lv_bar_set_range(s_bench_bar, 0, 100);
+    lv_bar_set_value(s_bench_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_bench_bar, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_bg_color(s_bench_bar, lv_color_hex(HC_HONEY), LV_PART_INDICATOR);
+    lv_obj_add_flag(s_bench_bar, LV_OBJ_FLAG_HIDDEN);
 
     /* baud selector */
     s_baud_row = lv_obj_create(ov);
@@ -794,7 +921,20 @@ void hc_ui_set_flash_progress(const hc_flash_progress_t *p)
 #if HAVE_LVGL
     if (!p) return;
     if (bsp_display_lock(50)) {
-        if (s_bench_status) lv_label_set_text(s_bench_status, p->message);
+        if (s_bench_status) {
+            if (p->bytes_total > 0) {
+                int pct = (int)((uint64_t)p->bytes_done * 100 / p->bytes_total);
+                char b[96];
+                snprintf(b, sizeof(b), "%s  %d%%", p->message, pct);
+                lv_label_set_text(s_bench_status, b);
+                if (s_bench_bar) {
+                    lv_obj_remove_flag(s_bench_bar, LV_OBJ_FLAG_HIDDEN);
+                    lv_bar_set_value(s_bench_bar, pct, LV_ANIM_OFF);
+                }
+            } else {
+                lv_label_set_text(s_bench_status, p->message);
+            }
+        }
         bsp_display_unlock();
     }
 #else
