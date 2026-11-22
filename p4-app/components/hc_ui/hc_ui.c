@@ -393,10 +393,14 @@ static void async_flash_picker(void *p)
     (void)p;
     if (s_flash_panel || s_flash_task) return;
 
+    if (!s_overlay) return;               /* bench closed before async ran */
+
     int n = 0;
     hc_storage_list_bins(s_bin_paths, 12, &n);
 
-    s_flash_panel = lv_obj_create(lv_screen_active());
+    /* Child of the bench overlay (same as every other panel) rather than a
+     * sibling on the scrollable screen. */
+    s_flash_panel = lv_obj_create(s_overlay);
     lv_obj_set_size(s_flash_panel, 560, 560);
     lv_obj_center(s_flash_panel);
     lv_obj_set_style_bg_color(s_flash_panel, lv_color_hex(HC_PANEL), 0);
@@ -455,6 +459,22 @@ static void clear_log_cb(lv_event_t *e)
     if (s_bench_log) lv_label_set_text(s_bench_log, "(cleared)");
 }
 
+static void save_log_cb(lv_event_t *e)
+{
+    (void)e;
+    char path[HC_PATH_MAX];
+    esp_err_t r = hc_storage_save_log(s_log_buf, path, sizeof(path));
+    if (s_bench_status) {
+        if (r == ESP_OK) {
+            char m[160];
+            snprintf(m, sizeof(m), "saved log to %s", path);
+            lv_label_set_text(s_bench_status, m);
+        } else {
+            lv_label_set_text(s_bench_status, "could not save log (no SD?)");
+        }
+    }
+}
+
 static void open_bench(void)
 {
     lv_obj_t *ov = tool_shell("usb bench");
@@ -470,9 +490,22 @@ static void open_bench(void)
     lv_obj_center(fbl);
     lv_obj_add_event_cb(flash_btn, flash_pick_cb, LV_EVENT_CLICKED, NULL);
 
+    lv_obj_t *save_btn = lv_button_create(ov);
+    lv_obj_set_size(save_btn, 90, 40);
+    lv_obj_align(save_btn, LV_ALIGN_TOP_RIGHT, -214, 16);
+    lv_obj_set_style_bg_color(save_btn, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(save_btn, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(save_btn, 1, 0);
+    lv_obj_set_style_radius(save_btn, 10, 0);
+    lv_obj_t *sbl = lv_label_create(save_btn);
+    lv_label_set_text(sbl, "save");
+    lv_obj_set_style_text_color(sbl, lv_color_hex(HC_LCYAN), 0);
+    lv_obj_center(sbl);
+    lv_obj_add_event_cb(save_btn, save_log_cb, LV_EVENT_CLICKED, NULL);
+
     lv_obj_t *clear_btn = lv_button_create(ov);
     lv_obj_set_size(clear_btn, 90, 40);
-    lv_obj_align(clear_btn, LV_ALIGN_TOP_RIGHT, -210, 16);
+    lv_obj_align(clear_btn, LV_ALIGN_TOP_RIGHT, -314, 16);
     lv_obj_set_style_bg_color(clear_btn, lv_color_hex(HC_PANEL), 0);
     lv_obj_set_style_border_color(clear_btn, lv_color_hex(HC_CYAN), 0);
     lv_obj_set_style_border_width(clear_btn, 1, 0);

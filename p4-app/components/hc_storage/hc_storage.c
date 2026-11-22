@@ -103,6 +103,26 @@ esp_err_t hc_storage_list_bins(char (*paths)[HC_PATH_MAX], int max, int *n)
     return ESP_OK;
 }
 
+esp_err_t hc_storage_save_log(const char *text, char *path_out, size_t cap)
+{
+    if (!s_mounted) return ESP_ERR_INVALID_STATE;
+    mkdir(CAP_DIR, 0777);                 /* ok if it already exists */
+    for (int i = 0; i < 1000; i++) {
+        char p[HC_PATH_MAX];
+        snprintf(p, sizeof(p), "%s/serial-%03d.txt", CAP_DIR, i);
+        struct stat st;
+        if (stat(p, &st) == 0) continue;  /* taken — try next */
+        FILE *f = fopen(p, "w");
+        if (!f) return ESP_FAIL;
+        if (text && *text) fwrite(text, 1, strlen(text), f);
+        fclose(f);
+        if (path_out) snprintf(path_out, cap, "%s", p);
+        ESP_LOGI(TAG, "saved serial log to %s", p);
+        return ESP_OK;
+    }
+    return ESP_FAIL;
+}
+
 esp_err_t hc_storage_pcap_open(char *path_out, size_t cap)
 {
     if (!s_mounted) { esp_err_t e = hc_storage_mount(); if (e != ESP_OK) return e; }
