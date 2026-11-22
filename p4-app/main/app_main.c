@@ -10,6 +10,9 @@
  */
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_event.h"
 
 #include "hc_board.h"
 #include "hc_storage.h"
@@ -54,17 +57,37 @@ void app_main(void)
     /* hc_flasher_start() is invoked from the Bench tab when a target is plugged
      * in; starting the USB host unconditionally at boot is optional. */
 
-    esp_err_t e = hc_mode_manager_start(on_mode, NULL);
+    /* C6 radio via ESP-Hosted (SDIO) — the real Tab5 mechanism. esp_wifi_remote
+     * forwards esp_wifi onto the C6 slave over SDIO (pins from the Tab5 board
+     * profile). This replaces the old custom UART handshake (hc_mode_manager),
+     * which spoke a protocol the factory C6 doesn't run. Phase 1 proof: bring
+     * WiFi up on the factory slave and do one scan, logged to serial. If the
+     * slave firmware version doesn't match this host, esp_wifi_init reports it
+     * here — that's our signal to do the Phase-2 SDIO reflash. */
+    esp_err_t e = esp_netif_init();
+    if (e == ESP_OK) e = esp_event_loop_create_default();
+    if (e == ESP_OK) { esp_netif_create_default_wifi_sta(); }
+    wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
+    e = esp_wifi_init(&wcfg);
     if (e != ESP_OK) {
-        ESP_LOGW(TAG, "C6 link not up (%s)", esp_err_to_name(e));
-        /* The SDIO C6-flash path (Plan A) is DISABLED. The C6 BOOT strap can't
-         * be driven over SDIO, so it never connects — and its failed SDIO
-         * attempt tears down the shared SDMMC host, which then makes every
-         * later SD access (serial-log Save, flash-from-SD file list) assert in
-         * the SD driver (xQueueSemaphoreTake on a NULL mutex). Flash the C6 via
-         * the M5 ESP32 downloader instead (docs/flashing.md Plan B). The P4
-         * flasher / serial bench / UI all run fine without the C6. */
-        ESP_LOGW(TAG, "continuing without C6 — flash it via the M5 downloader (Plan B)");
+        ESP_LOGE(TAG, "esp_wifi_init via C6 failed: %s", esp_err_to_name(e));
+        ESP_LOGW(TAG, "C6 WiFi not up — likely a slave-firmware version mismatch "
+                      "(factory slave is 1.4.1); Phase-2 SDIO reflash needed");
+    } else {
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        ESP_LOGI(TAG, "C6 WiFi up over SDIO — scanning...");
+        if (esp_wifi_scan_start(NULL, true) == ESP_OK) {
+            uint16_t n = 0;
+            esp_wifi_scan_get_ap_num(&n);
+            ESP_LOGI(TAG, "scan: %u APs", n);
+            uint16_t got = n < 20 ? n : 20;
+            static wifi_ap_record_t recs[20];
+            if (esp_wifi_scan_get_ap_records(&got, recs) == ESP_OK)
+                for (int i = 0; i < got; i++)
+                    ESP_LOGI(TAG, "  %3d dBm  ch%-2d  %s",
+                             recs[i].rssi, recs[i].primary, (char *)recs[i].ssid);
+        }
     }
 
     ESP_LOGI(TAG, "ready");
