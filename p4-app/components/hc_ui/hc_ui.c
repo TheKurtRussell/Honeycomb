@@ -198,6 +198,7 @@ static void close_tool(lv_event_t *e)
     s_dash_psram = s_dash_heap = s_dash_uptime = NULL;
     s_bench_status = NULL;
     s_bench_log = s_bench_logbox = NULL;
+    s_baud_row = NULL;
     s_tool_pending = false;
 }
 
@@ -311,6 +312,34 @@ static void open_msg(const char *title, const char *msg, uint32_t color)
 /* serial monitor line -> rolling on-screen log */
 static void bench_line(const char *line, void *ctx) { (void)ctx; hc_ui_log(line); }
 
+/* ---- baud selector ---- */
+static const uint32_t k_bauds[] = { 9600, 115200, 230400, 921600 };
+static lv_obj_t *s_baud_row;
+
+static void style_baud_btn(lv_obj_t *btn, bool active)
+{
+    lv_obj_set_style_bg_color(btn, lv_color_hex(active ? HC_HONEY : HC_PANEL), 0);
+    lv_obj_t *lbl = lv_obj_get_child(btn, 0);
+    if (lbl) lv_obj_set_style_text_color(lbl, lv_color_hex(active ? HC_BG : HC_LHONEY), 0);
+}
+
+static void baud_btn_cb(lv_event_t *e)
+{
+    uint32_t baud = (uint32_t)(intptr_t)lv_event_get_user_data(e);
+    lv_obj_t *btn = lv_event_get_target(e);
+    hc_flasher_monitor_start(baud, bench_line, NULL);   /* re-applies line coding live */
+    if (s_baud_row) {
+        uint32_t n = lv_obj_get_child_count(s_baud_row);
+        for (uint32_t i = 0; i < n; i++) {
+            lv_obj_t *c = lv_obj_get_child(s_baud_row, i);
+            style_baud_btn(c, c == btn);
+        }
+    }
+    char m[24];
+    snprintf(m, sizeof(m), "[baud -> %lu]", (unsigned long)baud);
+    hc_ui_log(m);
+}
+
 static void open_bench(void)
 {
     lv_obj_t *ov = tool_shell("usb bench");
@@ -327,12 +356,35 @@ static void open_bench(void)
     lv_label_set_text(s_bench_status, "starting USB host...");
     lv_obj_align(s_bench_status, LV_ALIGN_TOP_LEFT, 44, 128);
 
+    /* baud selector */
+    s_baud_row = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_baud_row);
+    lv_obj_set_size(s_baud_row, LV_PCT(88), 46);
+    lv_obj_align(s_baud_row, LV_ALIGN_TOP_LEFT, 44, 164);
+    lv_obj_set_flex_flow(s_baud_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_baud_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_baud_row, 8, 0);
+    for (int i = 0; i < (int)(sizeof(k_bauds) / sizeof(k_bauds[0])); i++) {
+        lv_obj_t *b = lv_button_create(s_baud_row);
+        lv_obj_set_size(b, 118, 40);
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(HC_HONEY), 0);
+        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_t *l = lv_label_create(b);
+        char t[12];
+        snprintf(t, sizeof(t), "%lu", (unsigned long)k_bauds[i]);
+        lv_label_set_text(l, t);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, baud_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)k_bauds[i]);
+        style_baud_btn(b, k_bauds[i] == 115200);
+    }
+
     /* scrolling serial log */
     s_log_buf[0] = 0; s_log_len = 0;
     s_bench_logbox = lv_obj_create(ov);
     lv_obj_remove_style_all(s_bench_logbox);
-    lv_obj_set_size(s_bench_logbox, LV_PCT(88), 420);
-    lv_obj_align(s_bench_logbox, LV_ALIGN_TOP_LEFT, 44, 168);
+    lv_obj_set_size(s_bench_logbox, LV_PCT(88), 462);
+    lv_obj_align(s_bench_logbox, LV_ALIGN_TOP_LEFT, 44, 220);
     lv_obj_set_style_bg_color(s_bench_logbox, lv_color_hex(HC_STRIPE), 0);
     lv_obj_set_style_bg_opa(s_bench_logbox, LV_OPA_40, 0);
     lv_obj_set_style_pad_all(s_bench_logbox, 8, 0);
