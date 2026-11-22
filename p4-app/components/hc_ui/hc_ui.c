@@ -184,14 +184,20 @@ static lv_obj_t  *s_dash_psram;
 static lv_obj_t  *s_dash_heap;
 static lv_obj_t  *s_dash_uptime;
 static lv_obj_t  *s_bench_status;
+static lv_obj_t  *s_bench_log;
+static lv_obj_t  *s_bench_logbox;
+static char       s_log_buf[2560];
+static size_t     s_log_len;
 
 static void close_tool(lv_event_t *e)
 {
     (void)e;
+    hc_flasher_monitor_stop();            /* harmless if no monitor is running */
     if (s_tool_timer) { lv_timer_delete(s_tool_timer); s_tool_timer = NULL; }
     if (s_overlay)    { lv_obj_delete_async(s_overlay); s_overlay = NULL; }
     s_dash_psram = s_dash_heap = s_dash_uptime = NULL;
     s_bench_status = NULL;
+    s_bench_log = s_bench_logbox = NULL;
     s_tool_pending = false;
 }
 
@@ -302,33 +308,46 @@ static void open_msg(const char *title, const char *msg, uint32_t color)
     lv_obj_center(m);
 }
 
+/* serial monitor line -> rolling on-screen log */
+static void bench_line(const char *line, void *ctx) { (void)ctx; hc_ui_log(line); }
+
 static void open_bench(void)
 {
     lv_obj_t *ov = tool_shell("usb bench");
 
     lv_obj_t *hint = lv_label_create(ov);
-    lv_label_set_text(hint, "USB-A serial bench");
+    lv_label_set_text(hint, "USB-A serial monitor");
     lv_obj_set_style_text_color(hint, lv_color_hex(HC_LHONEY), 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 44, 96);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 44, 92);
 
     s_bench_status = lv_label_create(ov);
     lv_label_set_long_mode(s_bench_status, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_bench_status, LV_PCT(82));
+    lv_obj_set_width(s_bench_status, LV_PCT(84));
     lv_obj_set_style_text_color(s_bench_status, lv_color_hex(HC_CYAN), 0);
     lv_label_set_text(s_bench_status, "starting USB host...");
-    lv_obj_align(s_bench_status, LV_ALIGN_TOP_LEFT, 44, 148);
+    lv_obj_align(s_bench_status, LV_ALIGN_TOP_LEFT, 44, 128);
 
-    lv_obj_t *note = lv_label_create(ov);
-    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(note, LV_PCT(82));
-    lv_label_set_text(note,
-        "Plug an ESP board into the USB-A port. This first version confirms the "
-        "port powers and enumerates your device; the live serial monitor and "
-        "flash-from-SD come next.");
-    lv_obj_set_style_text_color(note, lv_color_hex(HC_DIMTXT), 0);
-    lv_obj_align(note, LV_ALIGN_TOP_LEFT, 44, 210);
+    /* scrolling serial log */
+    s_log_buf[0] = 0; s_log_len = 0;
+    s_bench_logbox = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_bench_logbox);
+    lv_obj_set_size(s_bench_logbox, LV_PCT(88), 420);
+    lv_obj_align(s_bench_logbox, LV_ALIGN_TOP_LEFT, 44, 168);
+    lv_obj_set_style_bg_color(s_bench_logbox, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_bg_opa(s_bench_logbox, LV_OPA_40, 0);
+    lv_obj_set_style_pad_all(s_bench_logbox, 8, 0);
+    lv_obj_set_style_radius(s_bench_logbox, 8, 0);
+    lv_obj_set_scroll_dir(s_bench_logbox, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_bench_logbox, LV_SCROLLBAR_MODE_AUTO);
+
+    s_bench_log = lv_label_create(s_bench_logbox);
+    lv_label_set_long_mode(s_bench_log, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_bench_log, LV_PCT(100));
+    lv_obj_set_style_text_color(s_bench_log, lv_color_hex(HC_LCYAN), 0);
+    lv_label_set_text(s_bench_log, "(waiting for serial data)");
 
     hc_flasher_start();
+    hc_flasher_monitor_start(115200, bench_line, NULL);
 }
 
 static void async_open_tool(void *p)
@@ -736,7 +755,22 @@ void hc_ui_log(const char *line)
 #if HAVE_LVGL
     if (!line) return;
     if (bsp_display_lock(50)) {
-        if (s_bench_status) lv_label_set_text(s_bench_status, line);
+        if (s_bench_log) {
+            size_t ll = strlen(line);
+            if (ll > sizeof(s_log_buf) - 2) { line += ll - (sizeof(s_log_buf) - 2); ll = strlen(line); }
+            /* make room by dropping whole lines from the front */
+            while (s_log_len + ll + 2 >= sizeof(s_log_buf) && s_log_len) {
+                char *nl = memchr(s_log_buf, '\n', s_log_len);
+                size_t drop = nl ? (size_t)(nl - s_log_buf) + 1 : s_log_len;
+                memmove(s_log_buf, s_log_buf + drop, s_log_len - drop);
+                s_log_len -= drop;
+            }
+            memcpy(s_log_buf + s_log_len, line, ll); s_log_len += ll;
+            s_log_buf[s_log_len++] = '\n';
+            s_log_buf[s_log_len] = 0;
+            lv_label_set_text(s_bench_log, s_log_buf);
+            if (s_bench_logbox) lv_obj_scroll_to_y(s_bench_logbox, LV_COORD_MAX / 2, LV_ANIM_OFF);
+        }
         bsp_display_unlock();
     }
 #else

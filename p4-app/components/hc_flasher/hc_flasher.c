@@ -23,6 +23,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #if __has_include("usb/usb_host.h")
 #include "usb/usb_host.h"
@@ -38,32 +39,57 @@ static hc_flash_progress_cb_t s_cb;
 static void                  *s_ctx;
 static bool                   s_usb_jtag_target;  /* set during detect */
 
-/* ---------------- USB VCP transport (integration point) ----------------- */
-/* These wrap the esp usb_host_vcp handle. Marked TODO where the real handle
- * calls go; the signatures match what hc_esp_loader expects. */
-static int  vcp_write(const uint8_t *buf, size_t len, void *io) {
-    (void)io; /* TODO: return vcp->tx_blocking(buf, len); */
-    (void)buf; (void)len; return (int)len;
+/* ---------------- USB CDC-ACM serial transport -------------------------- */
+/* The hc_esp_loader protocol + the serial monitor both talk through these four
+ * functions. They wrap the esp usb_host_cdc_acm driver: TX is a blocking write,
+ * RX is pulled from a stream buffer that the driver's data callback fills, and
+ * DTR/RTS + baud map straight onto the CDC line-control requests. */
+#if HC_HAVE_USB && __has_include("usb/cdc_acm_host.h")
+#include "usb/cdc_acm_host.h"
+#include "freertos/stream_buffer.h"
+#define HC_HAVE_CDC 1
+static cdc_acm_dev_hdl_t    s_cdc;
+static StreamBufferHandle_t s_rx;          /* device -> host byte stream */
+static uint32_t             s_baud = 115200;
+#else
+#define HC_HAVE_CDC 0
+#endif
+
+static int vcp_write(const uint8_t *buf, size_t len, void *io) {
+    (void)io;
+#if HC_HAVE_CDC
+    if (s_cdc && cdc_acm_host_data_tx_blocking(s_cdc, buf, len, 1000) == ESP_OK)
+        return (int)len;
+#endif
+    (void)buf; (void)len; return -1;
 }
-static int  vcp_read(uint8_t *buf, size_t len, uint32_t to_ms, void *io) {
-    (void)io; (void)buf; (void)len; (void)to_ms;
-    /* TODO: pull from the VCP rx ring with timeout; return bytes read. */
-    return 0;
+static int vcp_read(uint8_t *buf, size_t len, uint32_t to_ms, void *io) {
+    (void)io;
+#if HC_HAVE_CDC
+    if (s_rx) return (int)xStreamBufferReceive(s_rx, buf, len, pdMS_TO_TICKS(to_ms));
+#endif
+    (void)buf; (void)len; (void)to_ms; return 0;
 }
 static void vcp_set_dtr_rts(bool dtr, bool rts, void *io) {
-    (void)io; (void)dtr; (void)rts;
-    /* TODO: vcp->line_control(dtr, rts); then a short vTaskDelay(2ms). */
+    (void)io;
+#if HC_HAVE_CDC
+    if (s_cdc) { cdc_acm_host_set_control_line_state(s_cdc, dtr, rts); vTaskDelay(pdMS_TO_TICKS(2)); }
+#else
+    (void)dtr; (void)rts;
+#endif
 }
 static void vcp_set_baud(uint32_t baud, void *io) {
-    (void)io; (void)baud;
-    /* TODO: vcp->line_coding_set({baud,8,N,1}); */
-}
-
-static esp_err_t vcp_open(void) {
-    /* TODO: usb_host install + VCP::open_from_new_dev(); detect bridge type and
-     * set s_usb_jtag_target = (device is native USB-serial-jtag). */
-    ESP_LOGW(TAG, "vcp_open(): USB host transport not yet bound (see hc_flasher.c)");
-    return ESP_ERR_NOT_SUPPORTED;
+    (void)io;
+#if HC_HAVE_CDC
+    s_baud = baud;
+    if (s_cdc) {
+        cdc_acm_line_coding_t lc = { .dwDTERate = baud, .bCharFormat = 0,
+                                     .bParityType = 0, .bDataBits = 8 };
+        cdc_acm_host_line_coding_set(s_cdc, &lc);
+    }
+#else
+    (void)baud;
+#endif
 }
 
 static const hc_loader_transport_t k_transport = {
@@ -133,6 +159,55 @@ static void usb_lib_task(void *arg) {
     }
 }
 
+#if HC_HAVE_CDC
+static SemaphoreHandle_t s_cdc_open_sig;   /* given when a device wants opening */
+static uint16_t          s_want_vid, s_want_pid;
+
+static bool cdc_rx_cb(const uint8_t *data, size_t len, void *arg) {
+    (void)arg;
+    if (s_rx) xStreamBufferSend(s_rx, data, len, 0);
+    return true;   /* data consumed */
+}
+
+static void cdc_event_cb(const cdc_acm_host_dev_event_data_t *ev, void *arg) {
+    (void)arg;
+    if (ev->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
+        if (s_cdc) { cdc_acm_host_close(s_cdc); s_cdc = NULL; }
+        report(HC_FL_IDLE, HC_TGT_UNKNOWN, 0, 0, "device unplugged");
+    }
+}
+
+/* Opening a CDC device blocks, so it runs on its own task, woken when the raw
+ * client enumerates a device and hands over its vid/pid. */
+static void cdc_open_task(void *arg) {
+    (void)arg;
+    const cdc_acm_host_device_config_t dcfg = {
+        .connection_timeout_ms = 2000,
+        .out_buffer_size = 512,
+        .event_cb = cdc_event_cb,
+        .data_cb  = cdc_rx_cb,
+        .user_arg = NULL,
+    };
+    while (1) {
+        if (xSemaphoreTake(s_cdc_open_sig, portMAX_DELAY) != pdTRUE) continue;
+        if (s_cdc) continue;   /* already have a serial session */
+        esp_err_t e = cdc_acm_host_open(s_want_vid, s_want_pid, 0, &dcfg, &s_cdc);
+        if (e == ESP_OK) {
+            cdc_acm_line_coding_t lc = { .dwDTERate = s_baud, .bCharFormat = 0,
+                                         .bParityType = 0, .bDataBits = 8 };
+            cdc_acm_host_line_coding_set(s_cdc, &lc);
+            cdc_acm_host_set_control_line_state(s_cdc, false, false);  /* let it run */
+            char m[48];
+            snprintf(m, sizeof(m), "serial open @ %lu baud", (unsigned long)s_baud);
+            report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, m);
+        } else {
+            ESP_LOGW(TAG, "cdc_acm_host_open: %s", esp_err_to_name(e));
+            report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, "not a serial (CDC) device");
+        }
+    }
+}
+#endif /* HC_HAVE_CDC */
+
 static void describe_device(usb_device_handle_t dev) {
     const usb_device_desc_t *dd = NULL;
     if (usb_host_get_device_descriptor(dev, &dd) != ESP_OK || !dd) {
@@ -144,18 +219,31 @@ static void describe_device(usb_device_handle_t dev) {
              dd->idVendor, dd->idProduct, dd->bDeviceClass);
     ESP_LOGI(TAG, "USB device: %s", msg);
     report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, msg);
+#if HC_HAVE_CDC
+    s_want_vid = dd->idVendor; s_want_pid = dd->idProduct;
+#endif
 }
 
 static void client_event_cb(const usb_host_client_event_msg_t *msg, void *arg) {
     (void)arg;
     switch (msg->event) {
     case USB_HOST_CLIENT_EVENT_NEW_DEV:
-        if (usb_host_device_open(s_client, msg->new_dev.address, &s_cur_dev) == ESP_OK)
+        if (usb_host_device_open(s_client, msg->new_dev.address, &s_cur_dev) == ESP_OK) {
             describe_device(s_cur_dev);
+            /* Hand off to the cdc_acm driver: close our descriptor-only handle,
+             * then wake the open task (cdc_acm claims the interface itself). */
+            usb_host_device_close(s_client, s_cur_dev);
+            s_cur_dev = NULL;
+#if HC_HAVE_CDC
+            if (s_cdc_open_sig) xSemaphoreGive(s_cdc_open_sig);
+#endif
+        }
         break;
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
         if (s_cur_dev) { usb_host_device_close(s_client, s_cur_dev); s_cur_dev = NULL; }
+#if !HC_HAVE_CDC
         report(HC_FL_IDLE, HC_TGT_UNKNOWN, 0, 0, "device unplugged");
+#endif
         break;
     default: break;
     }
@@ -185,6 +273,16 @@ esp_err_t hc_flasher_start(void) {
         return e;
     }
     xTaskCreate(usb_lib_task, "usb_lib", 4096, NULL, 10, NULL);
+
+#if HC_HAVE_CDC
+    s_rx = xStreamBufferCreate(4096, 1);
+    s_cdc_open_sig = xSemaphoreCreateBinary();
+    esp_err_t ce = cdc_acm_host_install(NULL);  /* NULL = default driver config */
+    if (ce != ESP_OK)
+        ESP_LOGW(TAG, "cdc_acm_host_install: %s (serial I/O disabled)", esp_err_to_name(ce));
+    else
+        xTaskCreate(cdc_open_task, "cdc_open", 4096, NULL, 7, NULL);
+#endif
 
     usb_host_client_config_t cc = {
         .is_synchronous = false,
@@ -278,7 +376,9 @@ static void monitor_task(void *arg) {
 
 esp_err_t hc_flasher_monitor_start(uint32_t baud, hc_serial_line_cb_t cb, void *ctx) {
     vcp_set_baud(baud, NULL);
-    s_mon_cb = cb; s_mon_ctx = ctx; s_mon_run = true;
+    s_mon_cb = cb; s_mon_ctx = ctx;
+    if (s_mon_run) return ESP_OK;   /* already monitoring — just updated cb/baud */
+    s_mon_run = true;
     return xTaskCreate(monitor_task, "hc_mon", 4096, NULL, 8, &s_mon_task) == pdPASS
            ? ESP_OK : ESP_ERR_NO_MEM;
 }
