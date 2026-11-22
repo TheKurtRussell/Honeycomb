@@ -193,13 +193,18 @@ static void cdc_open_task(void *arg) {
     while (1) {
         if (xSemaphoreTake(s_cdc_open_sig, portMAX_DELAY) != pdTRUE) continue;
         if (s_cdc) continue;   /* already have a serial session */
+        ESP_LOGI(TAG, "cdc: opening %04X:%04X", s_want_vid, s_want_pid);
         esp_err_t e = cdc_acm_host_open(s_want_vid, s_want_pid, 0, &dcfg, &s_cdc);
+        ESP_LOGI(TAG, "cdc: open rc=%s", esp_err_to_name(e));
         if (e == ESP_OK) {
             cdc_acm_line_coding_t lc = { .dwDTERate = s_baud, .bCharFormat = 0,
                                          .bParityType = 0, .bDataBits = 8 };
+            ESP_LOGI(TAG, "cdc: set line coding");
             cdc_acm_host_line_coding_set(s_cdc, &lc);
+            ESP_LOGI(TAG, "cdc: set control lines");
             cdc_acm_host_set_control_line_state(s_cdc, false, false);  /* let it run */
             s_cdc_ready = true;        /* fully open — safe to flash/monitor now */
+            ESP_LOGI(TAG, "cdc: ready");
             char m[48];
             snprintf(m, sizeof(m), "serial open @ %lu baud", (unsigned long)s_baud);
             report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, m);
@@ -284,8 +289,9 @@ esp_err_t hc_flasher_start(void) {
     s_rx = xStreamBufferCreate(4096, 1);
     s_cdc_open_sig = xSemaphoreCreateBinary();
     esp_err_t ce = cdc_acm_host_install(NULL);  /* NULL = default driver config */
+    ESP_LOGI(TAG, "cdc_acm_host_install rc=%s", esp_err_to_name(ce));
     if (ce != ESP_OK)
-        ESP_LOGW(TAG, "cdc_acm_host_install: %s (serial I/O disabled)", esp_err_to_name(ce));
+        ESP_LOGW(TAG, "cdc_acm_host_install failed — serial I/O disabled");
     else
         xTaskCreate(cdc_open_task, "cdc_open", 4096, NULL, 7, NULL);
 #endif
