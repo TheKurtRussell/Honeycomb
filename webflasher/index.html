@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <title>Honeycomb — Flash your Tab5</title>
   <!--
     Web flasher for the Honeycomb P4 app. Uses the Tasmota/jason2866 fork of
@@ -35,7 +36,7 @@
       <li>Plug the Tab5 into the computer with a <strong>USB-C</strong> cable.</li>
       <li>Click Install and pick the Tab5's serial port.</li>
     </ol>
-    <esp-web-install-button manifest="manifest-p4.json"></esp-web-install-button>
+    <esp-web-install-button id="installbtn" manifest="manifest-p4.json"></esp-web-install-button>
   </div>
 
   <div class="card warn">
@@ -55,5 +56,16 @@
 
   <p style="color:#777;font-size:0.9rem">Built automatically by GitHub Actions
      from the Honeycomb source. Firmware versions shown after connecting.</p>
+  <p style="color:#999;font-size:0.8rem">web build <code>__BUILD_SHA__</code></p>
+
+  <script>
+    /* Always fetch the manifest fresh (?t=now) so a cached index.html can never
+       pin an old firmware again. The manifest points at merged-p4.bin?v=<sha>,
+       which changes every build, so the binary is re-fetched when it changes. */
+    (function () {
+      var btn = document.getElementById('installbtn');
+      if (btn) btn.setAttribute('manifest', 'manifest-p4.json?t=' + Date.now());
+    })();
+  </script>
 </body>
 </html>
