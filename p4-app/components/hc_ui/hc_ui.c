@@ -191,6 +191,7 @@ static lv_obj_t  *s_bench_log;
 static lv_obj_t  *s_bench_logbox;
 static lv_obj_t  *s_bench_bar;
 static lv_obj_t  *s_flash_panel;
+static lv_obj_t  *s_baud_row;
 static char       s_log_buf[2560];
 static size_t     s_log_len;
 static char       s_flash_path[HC_PATH_MAX];
@@ -323,7 +324,6 @@ static void bench_line(const char *line, void *ctx) { (void)ctx; hc_ui_log(line)
 
 /* ---- baud selector ---- */
 static const uint32_t k_bauds[] = { 9600, 115200, 230400, 921600 };
-static lv_obj_t *s_baud_row;
 
 static void style_baud_btn(lv_obj_t *btn, bool active)
 {
