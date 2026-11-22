@@ -435,14 +435,54 @@ static void open_game(void)
         lv_obj_set_style_border_width(s_pbot[i], 2, 0);
     }
 
+    /* The player is an actual little bee (a container of parts), moved as one
+     * by repositioning the container each tick. */
     s_bee = lv_obj_create(ov);
     lv_obj_remove_style_all(s_bee);
     lv_obj_set_size(s_bee, BEE_SZ, BEE_SZ);
-    lv_obj_set_style_radius(s_bee, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(s_bee, lv_color_hex(HC_HONEY), 0);
-    lv_obj_set_style_bg_opa(s_bee, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(s_bee, lv_color_hex(HC_STRIPE), 0);
-    lv_obj_set_style_border_width(s_bee, 3, 0);
+
+    lv_obj_t *wl = lv_obj_create(s_bee);
+    lv_obj_remove_style_all(wl);
+    lv_obj_set_size(wl, 17, 13);
+    lv_obj_set_pos(wl, 2, 1);
+    lv_obj_set_style_radius(wl, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(wl, lv_color_hex(0xCFEFEF), 0);
+    lv_obj_set_style_bg_opa(wl, LV_OPA_70, 0);
+
+    lv_obj_t *wr = lv_obj_create(s_bee);
+    lv_obj_remove_style_all(wr);
+    lv_obj_set_size(wr, 17, 13);
+    lv_obj_set_pos(wr, 19, 1);
+    lv_obj_set_style_radius(wr, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(wr, lv_color_hex(0xCFEFEF), 0);
+    lv_obj_set_style_bg_opa(wr, LV_OPA_70, 0);
+
+    lv_obj_t *body = lv_obj_create(s_bee);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, 28, 22);
+    lv_obj_set_pos(body, 3, 9);
+    lv_obj_set_style_radius(body, 11, 0);
+    lv_obj_set_style_bg_color(body, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(body, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_border_width(body, 2, 0);
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *st = lv_obj_create(s_bee);
+        lv_obj_remove_style_all(st);
+        lv_obj_set_size(st, 28, 3);
+        lv_obj_set_pos(st, 3, 15 + i * 6);
+        lv_obj_set_style_bg_color(st, lv_color_hex(HC_STRIPE), 0);
+        lv_obj_set_style_bg_opa(st, LV_OPA_COVER, 0);
+    }
+
+    lv_obj_t *head = lv_obj_create(s_bee);
+    lv_obj_remove_style_all(head);
+    lv_obj_set_size(head, 10, 10);
+    lv_obj_set_pos(head, 28, 15);
+    lv_obj_set_style_radius(head, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(head, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_bg_opa(head, LV_OPA_COVER, 0);
 
     s_score_lbl = lv_label_create(ov);
     lv_obj_set_style_text_color(s_score_lbl, lv_color_hex(HC_HONEY), 0);
@@ -518,7 +558,11 @@ esp_err_t hc_ui_init(void *lv_display)
                 lv_line_set_points(hex, HEXP, 7);
                 lv_obj_set_style_line_color(hex, lv_color_hex(HC_DIMLINE), 0);
                 lv_obj_set_style_line_width(hex, 2, 0);
-                lv_obj_set_style_line_rounded(hex, true, 0);
+                /* No rounded caps on decorative cells: rounding makes LVGL fill
+                 * a circle at every one of the 7 points, and with ~110 cells
+                 * that dominates the comb repaint when returning from a tool
+                 * (the slow "Back"). Square joins look the same at this size. */
+                lv_obj_set_style_line_rounded(hex, false, 0);
                 continue;
             }
 
