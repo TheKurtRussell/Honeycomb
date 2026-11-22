@@ -504,6 +504,23 @@ esp_err_t hc_ui_init(void *lv_display)
             int x = COMB_OX + c * HEX_AX;
             int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
             const hc_tile_t *t = find_tile(c, r);
+            bool secret = (c == SECRET_COL && r == SECRET_ROW);
+
+            /* Decorative cells (the vast majority) are just a dim hex outline.
+             * Draw the line straight onto the field with no wrapper object —
+             * that halves the comb's object count and keeps the LVGL pool from
+             * filling up, which otherwise makes a heavy overlay's allocations
+             * fail. Only interactive cells get a wrapper for their click area
+             * and centered labels. */
+            if (!t && !secret) {
+                lv_obj_t *hex = lv_line_create(field);
+                lv_obj_set_pos(hex, x, y);
+                lv_line_set_points(hex, HEXP, 7);
+                lv_obj_set_style_line_color(hex, lv_color_hex(HC_DIMLINE), 0);
+                lv_obj_set_style_line_width(hex, 2, 0);
+                lv_obj_set_style_line_rounded(hex, true, 0);
+                continue;
+            }
 
             lv_obj_t *cell = bare(field);
             lv_obj_set_pos(cell, x, y);
@@ -511,7 +528,7 @@ esp_err_t hc_ui_init(void *lv_display)
 
             lv_obj_t *hex = lv_line_create(cell);
             lv_line_set_points(hex, HEXP, 7);
-            lv_obj_set_style_line_color(hex, lv_color_hex(t ? t->line_color : HC_DIMLINE), 0);
+            lv_obj_set_style_line_color(hex, lv_color_hex(t ? t->line_color : 0x7A6322), 0);
             lv_obj_set_style_line_width(hex, t ? 3 : 2, 0);
             lv_obj_set_style_line_rounded(hex, true, 0);
 
@@ -530,9 +547,8 @@ esp_err_t hc_ui_init(void *lv_display)
                 lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
                 lv_obj_add_event_cb(cell, tile_click_cb, LV_EVENT_CLICKED,
                                     (void *)(intptr_t)t->id);
-            } else if (c == SECRET_COL && r == SECRET_ROW) {
+            } else {
                 /* hidden game cell: a faint honey tint + dot as the only hint */
-                lv_obj_set_style_line_color(hex, lv_color_hex(0x7A6322), 0);
                 lv_obj_t *dot = lv_label_create(cell);
                 lv_label_set_text(dot, ".");
                 lv_obj_set_style_text_color(dot, lv_color_hex(HC_HONEY), 0);
