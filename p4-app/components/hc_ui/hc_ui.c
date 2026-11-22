@@ -183,6 +183,7 @@ static lv_timer_t *s_tool_timer;
 static lv_obj_t  *s_dash_psram;
 static lv_obj_t  *s_dash_heap;
 static lv_obj_t  *s_dash_uptime;
+static lv_obj_t  *s_bench_status;
 
 static void close_tool(lv_event_t *e)
 {
@@ -190,6 +191,7 @@ static void close_tool(lv_event_t *e)
     if (s_tool_timer) { lv_timer_delete(s_tool_timer); s_tool_timer = NULL; }
     if (s_overlay)    { lv_obj_delete_async(s_overlay); s_overlay = NULL; }
     s_dash_psram = s_dash_heap = s_dash_uptime = NULL;
+    s_bench_status = NULL;
     s_tool_pending = false;
 }
 
@@ -300,6 +302,35 @@ static void open_msg(const char *title, const char *msg, uint32_t color)
     lv_obj_center(m);
 }
 
+static void open_bench(void)
+{
+    lv_obj_t *ov = tool_shell("usb bench");
+
+    lv_obj_t *hint = lv_label_create(ov);
+    lv_label_set_text(hint, "USB-A serial bench");
+    lv_obj_set_style_text_color(hint, lv_color_hex(HC_LHONEY), 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 44, 96);
+
+    s_bench_status = lv_label_create(ov);
+    lv_label_set_long_mode(s_bench_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_bench_status, LV_PCT(82));
+    lv_obj_set_style_text_color(s_bench_status, lv_color_hex(HC_CYAN), 0);
+    lv_label_set_text(s_bench_status, "starting USB host...");
+    lv_obj_align(s_bench_status, LV_ALIGN_TOP_LEFT, 44, 148);
+
+    lv_obj_t *note = lv_label_create(ov);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(note, LV_PCT(82));
+    lv_label_set_text(note,
+        "Plug an ESP board into the USB-A port. This first version confirms the "
+        "port powers and enumerates your device; the live serial monitor and "
+        "flash-from-SD come next.");
+    lv_obj_set_style_text_color(note, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(note, LV_ALIGN_TOP_LEFT, 44, 210);
+
+    hc_flasher_start();
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -307,7 +338,7 @@ static void async_open_tool(void *p)
     int id = (int)(intptr_t)p;
     switch (id) {
         case TOOL_CONFIG: open_config(); break;
-        case TOOL_BENCH:  open_msg("usb bench", "coming soon", HC_LHONEY); break;
+        case TOOL_BENCH:  open_bench(); break;
         default:          open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
 }
@@ -687,5 +718,28 @@ void hc_ui_set_mode(hc_radio_mode_t mode, bool ok)
 #endif
 }
 
-void hc_ui_set_flash_progress(const hc_flash_progress_t *p) { (void)p; }
-void hc_ui_log(const char *line) { (void)line; }
+void hc_ui_set_flash_progress(const hc_flash_progress_t *p)
+{
+#if HAVE_LVGL
+    if (!p) return;
+    if (bsp_display_lock(50)) {
+        if (s_bench_status) lv_label_set_text(s_bench_status, p->message);
+        bsp_display_unlock();
+    }
+#else
+    (void)p;
+#endif
+}
+
+void hc_ui_log(const char *line)
+{
+#if HAVE_LVGL
+    if (!line) return;
+    if (bsp_display_lock(50)) {
+        if (s_bench_status) lv_label_set_text(s_bench_status, line);
+        bsp_display_unlock();
+    }
+#else
+    (void)line;
+#endif
+}

@@ -23,6 +23,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#if __has_include("usb/usb_host.h")
+#include "usb/usb_host.h"
+#define HC_HAVE_USB 1
+#else
+#define HC_HAVE_USB 0
+#endif
+
 #define TAG "hc_flash"
 #define FLASH_BLOCK 1024
 
@@ -105,10 +112,97 @@ esp_err_t hc_flasher_init(hc_flash_progress_cb_t cb, void *ctx) {
     return ESP_OK;
 }
 
+/* ---------------- USB host bring-up + device enumeration ----------------
+ * Iteration 1: bring up the USB host stack on the Tab5's USB-A port and report
+ * whatever board is plugged in (VID/PID + device class). This isolates the one
+ * thing that can only be tested on hardware — does the port power and enumerate
+ * a device — from the serial I/O + flashing, which bind on top next via the
+ * usb_host_cdc_acm driver. Core IDF USB host API only (no managed component). */
+#if HC_HAVE_USB
+static bool                     s_usb_up;
+static usb_host_client_handle_t s_client;
+static usb_device_handle_t      s_cur_dev;
+
+static void usb_lib_task(void *arg) {
+    (void)arg;
+    while (1) {
+        uint32_t flags;
+        usb_host_lib_handle_events(portMAX_DELAY, &flags);
+        (void)flags;  /* NO_CLIENTS / ALL_FREE: nothing to clean up yet */
+    }
+}
+
+static void describe_device(usb_device_handle_t dev) {
+    const usb_device_desc_t *dd = NULL;
+    if (usb_host_get_device_descriptor(dev, &dd) != ESP_OK || !dd) {
+        report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, "device (no descriptor)");
+        return;
+    }
+    char msg[64];
+    snprintf(msg, sizeof(msg), "found %04X:%04X class %02X",
+             dd->idVendor, dd->idProduct, dd->bDeviceClass);
+    ESP_LOGI(TAG, "USB device: %s", msg);
+    report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, msg);
+}
+
+static void client_event_cb(const usb_host_client_event_msg_t *msg, void *arg) {
+    (void)arg;
+    switch (msg->event) {
+    case USB_HOST_CLIENT_EVENT_NEW_DEV:
+        if (usb_host_device_open(s_client, msg->new_dev.address, &s_cur_dev) == ESP_OK)
+            describe_device(s_cur_dev);
+        break;
+    case USB_HOST_CLIENT_EVENT_DEV_GONE:
+        if (s_cur_dev) { usb_host_device_close(s_client, s_cur_dev); s_cur_dev = NULL; }
+        report(HC_FL_IDLE, HC_TGT_UNKNOWN, 0, 0, "device unplugged");
+        break;
+    default: break;
+    }
+}
+
+static void usb_client_task(void *arg) {
+    (void)arg;
+    while (1) usb_host_client_handle_events(s_client, portMAX_DELAY);
+}
+#endif /* HC_HAVE_USB */
+
 esp_err_t hc_flasher_start(void) {
-    esp_err_t e = vcp_open();
-    if (e == ESP_OK) report(HC_FL_DEVICE_READY, HC_TGT_UNKNOWN, 0, 0, "device ready");
-    return e;
+#if HC_HAVE_USB
+    if (s_usb_up) {
+        /* already running — re-report current state so a reopened Bench updates */
+        if (s_cur_dev) describe_device(s_cur_dev);
+        else report(HC_FL_IDLE, HC_TGT_UNKNOWN, 0, 0, "waiting for a board…");
+        return ESP_OK;
+    }
+    usb_host_config_t hc = { .skip_phy_setup = false, .intr_flags = ESP_INTR_FLAG_LEVEL1 };
+    esp_err_t e = usb_host_install(&hc);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "usb_host_install: %s", esp_err_to_name(e));
+        report(HC_FL_ERROR, HC_TGT_UNKNOWN, 0, 0, "USB host install failed");
+        return e;
+    }
+    xTaskCreate(usb_lib_task, "usb_lib", 4096, NULL, 10, NULL);
+
+    usb_host_client_config_t cc = {
+        .is_synchronous = false,
+        .max_num_event_msg = 5,
+        .async = { .client_event_callback = client_event_cb, .callback_arg = NULL },
+    };
+    e = usb_host_client_register(&cc, &s_client);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "usb_host_client_register: %s", esp_err_to_name(e));
+        report(HC_FL_ERROR, HC_TGT_UNKNOWN, 0, 0, "USB client register failed");
+        return e;
+    }
+    xTaskCreate(usb_client_task, "usb_cli", 4096, NULL, 9, NULL);
+    s_usb_up = true;
+    ESP_LOGI(TAG, "USB host up on USB-A");
+    report(HC_FL_IDLE, HC_TGT_UNKNOWN, 0, 0, "USB host up — plug in a board");
+    return ESP_OK;
+#else
+    report(HC_FL_ERROR, HC_TGT_UNKNOWN, 0, 0, "no USB host support");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 esp_err_t hc_flasher_detect(hc_target_chip_t *chip_out) {
