@@ -103,6 +103,34 @@ esp_err_t hc_storage_list_bins(char (*paths)[HC_PATH_MAX], int max, int *n)
     return ESP_OK;
 }
 
+esp_err_t hc_storage_list_dir(const char *dir, hc_dirent_t *out, int max, int *n)
+{
+    if (!dir || !out || !n || max <= 0) return ESP_ERR_INVALID_ARG;
+    *n = 0;
+    if (!s_mounted) return ESP_ERR_INVALID_STATE;
+    DIR *d = opendir(dir);
+    if (!d) return ESP_FAIL;
+    struct dirent *de;
+    while (*n < max && (de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;   /* skip ., .., hidden */
+        hc_dirent_t *e = &out[*n];
+        snprintf(e->name, sizeof(e->name), "%s", de->d_name);
+        char full[HC_PATH_MAX + 66];
+        snprintf(full, sizeof(full), "%s/%s", dir, de->d_name);
+        struct stat st;
+        if (stat(full, &st) == 0) {
+            e->is_dir = S_ISDIR(st.st_mode);
+            e->size   = (uint32_t)st.st_size;
+        } else {
+            e->is_dir = (de->d_type == DT_DIR);
+            e->size   = 0;
+        }
+        (*n)++;
+    }
+    closedir(d);
+    return ESP_OK;
+}
+
 esp_err_t hc_storage_save_log(const char *text, char *path_out, size_t cap)
 {
     if (!s_mounted) return ESP_ERR_INVALID_STATE;

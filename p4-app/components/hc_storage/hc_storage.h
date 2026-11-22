@@ -27,6 +27,14 @@ bool      hc_storage_is_mounted(void);
 #define HC_PATH_MAX 128
 esp_err_t hc_storage_list_bins(char (*paths)[HC_PATH_MAX], int max, int *n);
 
+/* Generic directory listing for the file browser. */
+typedef struct {
+    char     name[64];
+    bool     is_dir;
+    uint32_t size;      /* bytes (files only) */
+} hc_dirent_t;
+esp_err_t hc_storage_list_dir(const char *dir, hc_dirent_t *out, int max, int *n);
+
 /* Save a text blob (e.g. the serial monitor log) to a fresh
  * /sdcard/honeycomb/serial-NNN.txt and return its path in path_out. */
 esp_err_t hc_storage_save_log(const char *text, char *path_out, size_t cap);

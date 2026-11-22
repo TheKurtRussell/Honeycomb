@@ -78,7 +78,7 @@ static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
 
-enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_CAPTURE, TOOL_DECODE, TOOL_MESH, TOOL_CONFIG };
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_CAPTURE, TOOL_DECODE, TOOL_MESH, TOOL_CONFIG, TOOL_FILES };
 
 typedef struct {
     int col, row;
@@ -92,6 +92,7 @@ typedef struct {
 /* The six live tools, clustered near the comb's center so the hive extends in
  * every direction from the start. Every other cell is an empty comb cell. */
 static const hc_tile_t s_tiles[] = {
+    {7, 2, LV_SYMBOL_DIRECTORY, "files",   HC_HONEY, HC_LHONEY, TOOL_FILES},
     {6, 3, LV_SYMBOL_LIST,     "decode",   HC_HONEY, HC_LHONEY, TOOL_DECODE},
     {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY, TOOL_BENCH},
     {8, 3, LV_SYMBOL_SAVE,     "capture",  HC_HONEY, HC_LHONEY, TOOL_CAPTURE},
@@ -192,6 +193,9 @@ static lv_obj_t  *s_bench_logbox;
 static lv_obj_t  *s_bench_bar;
 static lv_obj_t  *s_flash_panel;
 static lv_obj_t  *s_baud_row;
+static lv_obj_t  *s_fb_list;
+static lv_obj_t  *s_fb_pathlbl;
+static char       s_fb_path[160];
 static char       s_log_buf[2560];
 static size_t     s_log_len;
 static char       s_flash_path[HC_PATH_MAX];
@@ -210,6 +214,7 @@ static void close_tool(lv_event_t *e)
     s_bench_log = s_bench_logbox = NULL;
     s_bench_bar = NULL;
     s_baud_row = NULL;
+    s_fb_list = s_fb_pathlbl = NULL;
     s_tool_pending = false;
 }
 
@@ -597,6 +602,100 @@ static void open_bench(void)
     hc_flasher_monitor_start(s_cur_baud, bench_line, NULL);
 }
 
+/* ---- SD file browser ---- */
+static hc_dirent_t s_fb_entries[64];
+static void fb_populate(void);
+static void fb_refresh(void *p) { (void)p; fb_populate(); }
+
+static void fb_up_cb(lv_event_t *e)
+{
+    (void)e;
+    char *slash = strrchr(s_fb_path, '/');
+    if (slash && slash != s_fb_path) *slash = 0;
+    if (strlen(s_fb_path) < 7) strcpy(s_fb_path, "/sdcard");   /* floor at mount */
+    lv_async_call(fb_refresh, NULL);     /* rebuild outside the click event */
+}
+
+static void fb_dir_cb(lv_event_t *e)
+{
+    const char *name = (const char *)lv_event_get_user_data(e);
+    size_t l = strlen(s_fb_path);
+    snprintf(s_fb_path + l, sizeof(s_fb_path) - l, "/%s", name);
+    lv_async_call(fb_refresh, NULL);
+}
+
+static lv_obj_t *fb_row(const char *text, bool tappable)
+{
+    lv_obj_t *b = lv_button_create(s_fb_list);
+    lv_obj_set_width(b, LV_PCT(100));
+    lv_obj_set_style_bg_color(b, lv_color_hex(tappable ? HC_STRIPE : HC_PANEL), 0);
+    lv_obj_set_style_radius(b, 6, 0);
+    if (!tappable) lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, text);
+    lv_obj_set_style_text_color(l, lv_color_hex(tappable ? HC_LHONEY : HC_LCYAN), 0);
+    return b;
+}
+
+static void fb_populate(void)
+{
+    if (!s_fb_list) return;
+    lv_obj_clean(s_fb_list);                 /* drop previous rows */
+    if (s_fb_pathlbl) lv_label_set_text(s_fb_pathlbl, s_fb_path);
+
+    int n = 0;
+    hc_storage_list_dir(s_fb_path, s_fb_entries, 64, &n);
+
+    if (strcmp(s_fb_path, "/sdcard") != 0) {
+        lv_obj_t *up = fb_row(LV_SYMBOL_UP "  ..", true);
+        lv_obj_add_event_cb(up, fb_up_cb, LV_EVENT_CLICKED, NULL);
+    }
+    for (int i = 0; i < n; i++) {
+        char label[112];
+        if (s_fb_entries[i].is_dir)
+            snprintf(label, sizeof(label), LV_SYMBOL_DIRECTORY "  %s", s_fb_entries[i].name);
+        else
+            snprintf(label, sizeof(label), LV_SYMBOL_FILE "  %s   (%lu B)",
+                     s_fb_entries[i].name, (unsigned long)s_fb_entries[i].size);
+        lv_obj_t *row = fb_row(label, s_fb_entries[i].is_dir);
+        if (s_fb_entries[i].is_dir)
+            lv_obj_add_event_cb(row, fb_dir_cb, LV_EVENT_CLICKED, s_fb_entries[i].name);
+    }
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(s_fb_list);
+        lv_label_set_text(empty, "(empty)");
+        lv_obj_set_style_text_color(empty, lv_color_hex(HC_DIMTXT), 0);
+    }
+}
+
+static void open_files(void)
+{
+    lv_obj_t *ov = tool_shell("files");
+    strcpy(s_fb_path, "/sdcard");
+
+    s_fb_pathlbl = lv_label_create(ov);
+    lv_label_set_long_mode(s_fb_pathlbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_fb_pathlbl, LV_PCT(84));
+    lv_obj_set_style_text_color(s_fb_pathlbl, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_fb_pathlbl, LV_ALIGN_TOP_LEFT, 44, 98);
+    lv_label_set_text(s_fb_pathlbl, s_fb_path);
+
+    s_fb_list = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_fb_list);
+    lv_obj_set_size(s_fb_list, LV_PCT(88), 520);
+    lv_obj_align(s_fb_list, LV_ALIGN_TOP_LEFT, 44, 134);
+    lv_obj_set_style_bg_color(s_fb_list, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_bg_opa(s_fb_list, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(s_fb_list, 8, 0);
+    lv_obj_set_style_radius(s_fb_list, 8, 0);
+    lv_obj_set_flex_flow(s_fb_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_fb_list, 6, 0);
+    lv_obj_set_scroll_dir(s_fb_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_fb_list, LV_SCROLLBAR_MODE_AUTO);
+
+    fb_populate();
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -605,6 +704,7 @@ static void async_open_tool(void *p)
     switch (id) {
         case TOOL_CONFIG: open_config(); break;
         case TOOL_BENCH:  open_bench(); break;
+        case TOOL_FILES:  open_files(); break;
         default:          open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
 }
