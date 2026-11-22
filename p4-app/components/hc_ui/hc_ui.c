@@ -196,6 +196,7 @@ static char       s_log_buf[2560];
 static size_t     s_log_len;
 static char       s_flash_path[HC_PATH_MAX];
 static char       s_bin_paths[12][HC_PATH_MAX];
+static uint32_t   s_cur_baud = 115200;
 
 static void close_tool(lv_event_t *e)
 {
@@ -336,6 +337,7 @@ static void baud_btn_cb(lv_event_t *e)
 {
     uint32_t baud = (uint32_t)(intptr_t)lv_event_get_user_data(e);
     lv_obj_t *btn = lv_event_get_target(e);
+    s_cur_baud = baud;
     hc_flasher_monitor_start(baud, bench_line, NULL);   /* re-applies line coding live */
     if (s_baud_row) {
         uint32_t n = lv_obj_get_child_count(s_baud_row);
@@ -360,7 +362,7 @@ static void flash_task(void *arg)
     hc_flash_region_t region = { .offset = 0 };
     strncpy(region.sd_path, s_flash_path, sizeof(region.sd_path) - 1);
     hc_flasher_write(&region, 1);        /* blocks; reports progress via the cb */
-    hc_flasher_monitor_start(115200, bench_line, NULL);  /* watch it boot */
+    hc_flasher_monitor_start(s_cur_baud, bench_line, NULL);  /* watch it boot */
     s_flash_task = NULL;
     vTaskDelete(NULL);
 }
@@ -503,7 +505,7 @@ static void open_bench(void)
         lv_label_set_text(l, t);
         lv_obj_center(l);
         lv_obj_add_event_cb(b, baud_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)k_bauds[i]);
-        style_baud_btn(b, k_bauds[i] == 115200);
+        style_baud_btn(b, k_bauds[i] == s_cur_baud);
     }
 
     /* scrolling serial log */
@@ -526,7 +528,7 @@ static void open_bench(void)
     lv_label_set_text(s_bench_log, "(waiting for serial data)");
 
     hc_flasher_start();
-    hc_flasher_monitor_start(115200, bench_line, NULL);
+    hc_flasher_monitor_start(s_cur_baud, bench_line, NULL);
 }
 
 static void async_open_tool(void *p)
