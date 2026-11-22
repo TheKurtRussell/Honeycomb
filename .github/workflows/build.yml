@@ -48,12 +48,10 @@ jobs:
       - name: Dump ESP-Hosted Kconfig (debug)
         if: always() && matrix.name == 'p4'
         run: |
-          for pat in esp_hosted esp_wifi_remote; do
-            find ${{ matrix.path }} -path "*${pat}*" -name 'Kconfig*' 2>/dev/null | while read f; do
-              echo "===== $f ====="
-              grep -niE 'sdio|gpio|_pin|_clk|_cmd|_d[0-3]\b|reset|cherryusb|host_interface|slave_target|^[[:space:]]*config ' "$f" | head -150
-            done
-          done
+          find ${{ matrix.path }}/managed_components -name 'Kconfig*' \
+            \( -path '*esp_hosted*' -o -path '*esp_wifi_remote*' \) \
+            ! -path '*tools*' ! -path '*test*' ! -path '*vendor*' ! -path '*examples*' \
+            | while read f; do echo "===== $f ====="; cat "$f"; done
 
       - name: Merge ${{ matrix.name }} image
         run: |
