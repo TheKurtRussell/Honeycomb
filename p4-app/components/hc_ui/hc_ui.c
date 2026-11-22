@@ -182,7 +182,8 @@ static lv_obj_t *status_chip(lv_obj_t *parent, const char *label, const char *va
 
 /* ---- tool views: tap a tile -> full-screen overlay with a back button ---- */
 static lv_obj_t  *s_overlay;
-static lv_obj_t  *s_comb;        /* the pannable comb container (freed while a tool is open) */
+static lv_obj_t  *s_comb;        /* the pannable comb container (hidden for tools, freed for the game) */
+static bool       s_comb_hidden; /* true when the comb is kept alive but hidden behind an overlay */
 static lv_obj_t  *s_scr;         /* active screen, for rebuilding the comb */
 static bool       s_tool_pending;
 static lv_timer_t *s_tool_timer;
@@ -315,15 +316,30 @@ static void close_tool(lv_event_t *e)
     s_baud_row = NULL;
     s_fb_list = s_fb_pathlbl = NULL;
     s_tool_pending = false;
-    lv_async_call(rebuild_comb_async, NULL);   /* bring the comb back (after the event) */
+    /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
+     * instant, no rebuild. If it was freed (the game), rebuild it async. */
+    if (s_comb && s_comb_hidden) {
+        lv_obj_remove_flag(s_comb, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_background(s_comb);
+        s_comb_hidden = false;
+    } else {
+        lv_async_call(rebuild_comb_async, NULL);
+    }
 }
 
-static lv_obj_t *tool_shell(const char *title)
+static lv_obj_t *tool_shell_ex(const char *title, bool free_comb)
 {
-    /* Free the comb so this overlay has the whole LVGL pool. Safe to delete
-     * now — tool_shell is only reached from lv_async (not inside an event).
-     * The comb is rebuilt by close_tool when the overlay closes. */
-    if (s_comb) { lv_obj_delete(s_comb); s_comb = NULL; }
+    /* The comb sits behind the overlay. For tools we HIDE it (kept in the pool,
+     * so reopening/closing is instant). For the memory-heavy game we DELETE it
+     * so the whole LVGL pool is free. tool_shell_ex is only reached from
+     * lv_async (not inside an event), so deleting here is safe. */
+    if (free_comb) {
+        if (s_comb) { lv_obj_delete(s_comb); s_comb = NULL; }
+        s_comb_hidden = false;
+    } else if (s_comb) {
+        lv_obj_add_flag(s_comb, LV_OBJ_FLAG_HIDDEN);
+        s_comb_hidden = true;
+    }
 
     s_overlay = lv_obj_create(lv_screen_active());
     lv_obj_remove_style_all(s_overlay);
@@ -352,6 +368,9 @@ static lv_obj_t *tool_shell(const char *title)
     lv_obj_align(tt, LV_ALIGN_TOP_LEFT, 160, 24);
     return s_overlay;
 }
+
+/* Tools keep the comb alive (hidden) for instant open/close. */
+static lv_obj_t *tool_shell(const char *title) { return tool_shell_ex(title, false); }
 
 static lv_obj_t *dash_row(lv_obj_t *parent, const char *k, const char *v, int y)
 {
@@ -919,7 +938,8 @@ static void game_flap(lv_event_t *e)
 
 static void open_game(void)
 {
-    lv_obj_t *ov = tool_shell("buzz");
+    /* The game is memory-heavy: free the comb so it has the whole LVGL pool. */
+    lv_obj_t *ov = tool_shell_ex("buzz", true);
     lv_obj_add_event_cb(ov, game_flap, LV_EVENT_CLICKED, NULL);
 
     for (int i = 0; i < NPIPE; i++) {
