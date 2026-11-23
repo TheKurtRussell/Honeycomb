@@ -1520,10 +1520,18 @@ static void ble_refresh(lv_timer_t *t)
         if (kind[0])                         o += snprintf(bot + o, sizeof(bot) - o, " · %s", kind);
         if (devs[i].name[0] && ven[0])       o += snprintf(bot + o, sizeof(bot) - o, " · %s", ven);
         if (devs[i].connectable)             o += snprintf(bot + o, sizeof(bot) - o, " · conn");
+        if (devs[i].tracker)                 o += snprintf(bot + o, sizeof(bot) - o,
+                                                  " · " LV_SYMBOL_WARNING " %s",
+                                                  hc_ble_tracker_name(devs[i].tracker));
         lv_obj_t *lb = lv_label_create(row);
         lv_label_set_text(lb, bot);
         lv_obj_align(lb, LV_ALIGN_BOTTOM_LEFT, 0, -4);
-        lv_obj_set_style_text_color(lb, lv_color_hex(HC_DIMTXT), 0);
+        lv_obj_set_style_text_color(lb,
+            lv_color_hex(devs[i].tracker ? HC_RED : HC_DIMTXT), 0);
+        if (devs[i].tracker) {
+            lv_obj_set_style_border_color(row, lv_color_hex(HC_RED), 0);
+            lv_obj_set_style_border_width(row, 1, 0);
+        }
     }
 
     if (s_ble_status) {
