@@ -19,7 +19,10 @@
 #include "esp_hosted_ota.h"
 
 #define TAG "hc_c6ota"
-#define CHUNK 1500
+/* Max OTA write payload is EH_HOST_CP_OTA_CHUNK_MAX (SDIO 1536 buf minus the
+ * V2 header, TLV envelope and OTA proto overhead ≈ 1480). Stay safely under it;
+ * a chunk over the limit makes esp_hosted_slave_ota_write return ESP_FAIL. */
+#define CHUNK 1024
 
 /* Compute the exact image length stored at the start of `part` (header +
  * segments + checksum + optional SHA256), so we send the real image, not the
