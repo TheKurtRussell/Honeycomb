@@ -178,6 +178,16 @@ int hc_ble_get(hc_ble_dev_t *out, int max)
     return n;
 }
 
+int hc_ble_find(const uint8_t *addr)
+{
+    int r = -128;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < s_ndev; i++)
+        if (memcmp(s_dev[i].addr, addr, 6) == 0) { r = s_dev[i].rssi; break; }
+    xSemaphoreGive(s_lock);
+    return r;
+}
+
 static void on_sync(void)
 {
     ble_hs_util_ensure_addr(0);

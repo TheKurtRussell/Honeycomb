@@ -58,6 +58,9 @@
 #define HC_STRIPE   0x1A1206   /* bee stripes                    */
 #define HC_GREEN    0x3BD16F   /* indicator: active              */
 #define HC_RED      0xE0533B   /* indicator: off                 */
+#define HC_SCAN     0x5BFF9A   /* radar/foxhunt phosphor green   */
+#define HC_SCANDIM  0x12502C   /* radar rings/grid (dim green)   */
+#define HC_AMBERW   0xFFB020   /* foxhunt "warm"                 */
 
 static bool s_active;
 
@@ -242,12 +245,25 @@ static lv_obj_t  *s_wifi_list;        /* explorer: AP list container */
 static lv_obj_t  *s_wifi_status;      /* explorer: "scanning..."/"N networks" */
 static lv_obj_t  *s_ble_list;         /* ble: device list container */
 static lv_obj_t  *s_ble_status;       /* ble: "scanning..."/"N devices" */
+#define RADAR_MAXBLIP 48
 static lv_obj_t  *s_radar_area;       /* radar: the circular scope */
 static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
 static lv_obj_t  *s_radar_blips;      /* radar: container for device blips */
+static lv_obj_t  *s_radar_blip[RADAR_MAXBLIP]; /* fixed blip pool (no churn) */
 static lv_obj_t  *s_radar_info;       /* radar: status/closest-device label */
 static float      s_radar_ang;        /* radar: current sweep angle (rad) */
 static int        s_radar_tick;       /* radar: tick counter for data refresh */
+static hc_ble_dev_t s_radar_devs[RADAR_MAXBLIP]; /* snapshot behind the blips */
+static int        s_radar_n;          /* count in s_radar_devs */
+static int        s_ble_last_n = -1;  /* ble list: last rendered count (rebuild on change) */
+/* Foxhunt: track one chosen device by signal strength to physically locate it. */
+static lv_obj_t  *s_fox_panel;
+static lv_obj_t  *s_fox_arc;
+static lv_obj_t  *s_fox_big;          /* big RSSI number */
+static lv_obj_t  *s_fox_trend;        /* warmer/colder */
+static lv_obj_t  *s_fox_name;
+static uint8_t    s_fox_addr[6];
+static int        s_fox_last = -127;
 static wifi_ap_record_t s_wifi_recs[30];
 static uint16_t   s_wifi_n;
 static volatile bool s_wifi_scanning;
@@ -385,6 +401,11 @@ static void close_tool(lv_event_t *e)
     s_wifi_list = s_wifi_status = NULL;
     s_ble_list = s_ble_status = NULL;
     s_radar_area = s_radar_sweep = s_radar_blips = s_radar_info = NULL;
+    for (int i = 0; i < RADAR_MAXBLIP; i++) s_radar_blip[i] = NULL;
+    s_radar_n = 0;
+    s_fox_panel = s_fox_arc = s_fox_big = s_fox_trend = s_fox_name = NULL;
+    s_fox_last = -127;
+    s_ble_last_n = -1;
     s_conn_panel = s_conn_pw = s_conn_kb = NULL;
     s_c6ota_panel = s_c6ota_status = s_c6ota_bar = NULL;
     s_tool_pending = false;
@@ -1267,6 +1288,18 @@ static void ble_refresh(lv_timer_t *t)
     int n = hc_ble_get(devs, 48);
     if (n > 24) n = 24;              /* cap rows — keep the strongest, limit churn */
 
+    /* Only rebuild when the device count changes — avoids churning ~150 LVGL
+     * objects every tick (which fragmented the heap). Status still updates below. */
+    if (n == s_ble_last_n) {
+        if (s_ble_status) {
+            char st[32];
+            snprintf(st, sizeof(st), "%s%d devices", hc_ble_scanning() ? "scanning... " : "", n);
+            lv_label_set_text(s_ble_status, st);
+        }
+        return;
+    }
+    s_ble_last_n = n;
+
     lv_obj_clean(s_ble_list);
     for (int i = 0; i < n; i++) {
         lv_obj_t *row = lv_obj_create(s_ble_list);
@@ -1384,6 +1417,124 @@ static float blip_radius(int rssi)
     return RADAR_R * t;
 }
 
+/* ---- foxhunt: lock onto one device and home in on it by signal strength ---- */
+
+/* Called from radar_tick: find the locked target in the latest snapshot and
+ * drive the proximity meter. */
+static void fox_update(void)
+{
+    if (!s_fox_panel) return;
+    int rssi = -127, found = 0;
+    for (int i = 0; i < s_radar_n; i++)
+        if (memcmp(s_radar_devs[i].addr, s_fox_addr, 6) == 0) { rssi = s_radar_devs[i].rssi; found = 1; break; }
+
+    int close = 0;
+    if (found) {
+        close = 100 * (rssi - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR);
+        if (close < 0) close = 0; if (close > 100) close = 100;
+    }
+    if (s_fox_arc) {
+        lv_arc_set_value(s_fox_arc, close);
+        uint32_t col = close > 66 ? HC_GREEN : close > 33 ? HC_HONEY : HC_RED;
+        lv_obj_set_style_arc_color(s_fox_arc, lv_color_hex(col), LV_PART_INDICATOR);
+    }
+    if (s_fox_big) {
+        char b[24];
+        if (found) snprintf(b, sizeof(b), "%d dBm", rssi);
+        else       snprintf(b, sizeof(b), "— —");
+        lv_label_set_text(s_fox_big, b);
+    }
+    if (s_fox_trend) {
+        const char *tr; uint32_t tc;
+        if (!found)                 { tr = "no signal";  tc = HC_DIMTXT; }
+        else if (rssi > s_fox_last + 2) { tr = "WARMER " LV_SYMBOL_UP;   tc = HC_GREEN; }
+        else if (rssi < s_fox_last - 2) { tr = "COLDER " LV_SYMBOL_DOWN; tc = HC_RED; }
+        else                        { tr = "steady";    tc = HC_LHONEY; }
+        lv_label_set_text(s_fox_trend, tr);
+        lv_obj_set_style_text_color(s_fox_trend, lv_color_hex(tc), 0);
+    }
+    if (found) s_fox_last = rssi;
+}
+
+static void fox_close_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_fox_panel) { lv_obj_delete_async(s_fox_panel); s_fox_panel = NULL; }
+    s_fox_arc = s_fox_big = s_fox_trend = s_fox_name = NULL;
+    s_fox_last = -127;
+}
+
+/* Build the foxhunt panel over the radar for the device at radar index idx. */
+static void open_foxhunt(int idx)
+{
+    if (s_fox_panel || idx < 0 || idx >= s_radar_n) return;
+    memcpy(s_fox_addr, s_radar_devs[idx].addr, 6);
+    s_fox_last = -127;
+
+    const char *ven = hc_ble_vendor(s_radar_devs[idx].company_id);
+    const char *who = s_radar_devs[idx].name[0] ? s_radar_devs[idx].name :
+                      (ven[0] ? ven : "unknown device");
+
+    s_fox_panel = lv_obj_create(s_overlay);
+    lv_obj_remove_style_all(s_fox_panel);
+    lv_obj_set_size(s_fox_panel, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_fox_panel, lv_color_hex(HC_BG), 0);
+    lv_obj_set_style_bg_opa(s_fox_panel, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_fox_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(s_fox_panel);
+    lv_label_set_text(title, LV_SYMBOL_GPS "  FOXHUNT");
+    lv_obj_set_style_text_color(title, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
+
+    s_fox_name = lv_label_create(s_fox_panel);
+    lv_label_set_text(s_fox_name, who);
+    lv_obj_set_style_text_color(s_fox_name, lv_color_hex(HC_HONEY), 0);
+    lv_obj_align(s_fox_name, LV_ALIGN_TOP_MID, 0, 56);
+
+    /* Big proximity arc. */
+    s_fox_arc = lv_arc_create(s_fox_panel);
+    lv_obj_set_size(s_fox_arc, 380, 380);
+    lv_obj_center(s_fox_arc);
+    lv_arc_set_rotation(s_fox_arc, 135);
+    lv_arc_set_bg_angles(s_fox_arc, 0, 270);
+    lv_arc_set_range(s_fox_arc, 0, 100);
+    lv_arc_set_value(s_fox_arc, 0);
+    lv_obj_remove_flag(s_fox_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(s_fox_arc, 22, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_fox_arc, 22, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_fox_arc, lv_color_hex(HC_STRIPE), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_fox_arc, LV_OPA_0, LV_PART_KNOB);
+
+    s_fox_big = lv_label_create(s_fox_panel);
+    lv_label_set_text(s_fox_big, "— —");
+    lv_obj_set_style_text_color(s_fox_big, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_fox_big, LV_ALIGN_CENTER, 0, -8);
+
+    s_fox_trend = lv_label_create(s_fox_panel);
+    lv_label_set_text(s_fox_trend, "locking on...");
+    lv_obj_set_style_text_color(s_fox_trend, lv_color_hex(HC_LHONEY), 0);
+    lv_obj_align(s_fox_trend, LV_ALIGN_CENTER, 0, 28);
+
+    lv_obj_t *done = lv_button_create(s_fox_panel);
+    lv_obj_set_size(done, 160, 56);
+    lv_obj_align(done, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_set_style_bg_color(done, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(done, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(done, 1, 0);
+    lv_obj_add_event_cb(done, fox_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *dl = lv_label_create(done);
+    lv_label_set_text(dl, "back to radar");
+    lv_obj_set_style_text_color(dl, lv_color_hex(HC_CYAN), 0);
+    lv_obj_center(dl);
+}
+
+static void blip_click_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    open_foxhunt(i);
+}
+
 static void radar_tick(lv_timer_t *t)
 {
     (void)t;
@@ -1398,43 +1549,45 @@ static void radar_tick(lv_timer_t *t)
     s_sweep_pts[1].y = RADAR_C + (lv_value_precise_t)(RADAR_R * sinf(s_radar_ang));
     if (s_radar_sweep) lv_line_set_points(s_radar_sweep, s_sweep_pts, 2);
 
-    /* Refresh the blips from the live table ~ every 720ms. */
+    /* Reposition the fixed blip pool from the live table ~ every 720ms. No
+     * object creation/deletion here — that churn fragmented the LVGL heap and
+     * eventually faulted on a NULL allocation. */
     if (++s_radar_tick % 9 != 0 || !s_radar_blips) return;
 
-    static hc_ble_dev_t devs[48];
-    int n = hc_ble_get(devs, 48);
-    if (n > 32) n = 32;             /* cap blips — strongest contacts, limit churn */
-    lv_obj_clean(s_radar_blips);
-    for (int i = 0; i < n; i++) {
-        float ang = blip_angle(devs[i].addr);
-        float r   = blip_radius(devs[i].rssi);
+    int n = hc_ble_get(s_radar_devs, RADAR_MAXBLIP);
+    s_radar_n = n;
+    for (int i = 0; i < RADAR_MAXBLIP; i++) {
+        lv_obj_t *b = s_radar_blip[i];
+        if (!b) continue;
+        if (i >= n) { lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN); continue; }
+        float ang = blip_angle(s_radar_devs[i].addr);
+        float r   = blip_radius(s_radar_devs[i].rssi);
         int x = RADAR_C + (int)(r * cosf(ang));
         int y = RADAR_C + (int)(r * sinf(ang));
-        int sz = devs[i].rssi > -55 ? 16 : devs[i].rssi > -75 ? 12 : 9;
-        lv_obj_t *b = lv_obj_create(s_radar_blips);
-        lv_obj_remove_style_all(b);
+        int sz = s_radar_devs[i].rssi > -55 ? 16 : s_radar_devs[i].rssi > -75 ? 12 : 9;
         lv_obj_set_size(b, sz, sz);
         lv_obj_set_pos(b, x - sz / 2, y - sz / 2);
-        lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-        uint32_t col = devs[i].rssi > -60 ? HC_HONEY :
-                       devs[i].rssi > -80 ? HC_LHONEY : HC_CYAN;
+        uint32_t col = s_radar_devs[i].rssi > -60 ? HC_HONEY :
+                       s_radar_devs[i].rssi > -80 ? HC_LHONEY : HC_CYAN;
         lv_obj_set_style_bg_color(b, lv_color_hex(col), 0);
+        lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (s_radar_info) {
         char info[64];
         if (n) {
-            const char *who = devs[0].name[0] ? devs[0].name :
-                              (hc_ble_vendor(devs[0].company_id)[0] ?
-                               hc_ble_vendor(devs[0].company_id) : "device");
+            const char *who = s_radar_devs[0].name[0] ? s_radar_devs[0].name :
+                              (hc_ble_vendor(s_radar_devs[0].company_id)[0] ?
+                               hc_ble_vendor(s_radar_devs[0].company_id) : "device");
             snprintf(info, sizeof(info), "%d contacts   ·   closest: %s %ddBm",
-                     n, who, devs[0].rssi);
+                     n, who, s_radar_devs[0].rssi);
         } else {
             snprintf(info, sizeof(info), "scanning...");
         }
         lv_label_set_text(s_radar_info, info);
     }
+
+    fox_update();   /* drive the foxhunt meter if a target is locked */
 }
 
 static void open_radar(void)
@@ -1493,6 +1646,20 @@ static void open_radar(void)
     lv_obj_set_size(s_radar_blips, RADAR_SZ, RADAR_SZ);
     lv_obj_set_pos(s_radar_blips, 0, 0);
     lv_obj_remove_flag(s_radar_blips, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Create the fixed blip pool once (hidden); radar_tick only moves/shows them.
+     * Each is tappable for selection -> foxhunt. */
+    for (int i = 0; i < RADAR_MAXBLIP; i++) {
+        lv_obj_t *b = lv_obj_create(s_radar_blips);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_size(b, 10, 10);
+        lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(b, blip_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        s_radar_blip[i] = b;
+    }
 
     s_radar_ang = 0;
     s_radar_tick = 0;

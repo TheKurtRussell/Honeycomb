@@ -52,6 +52,9 @@ void hc_ble_stop(void);
  * Returns the number written. Safe to call from any task. */
 int hc_ble_get(hc_ble_dev_t *out, int max);
 
+/* Current RSSI for a specific address, or -128 if not in the table. For foxhunt. */
+int hc_ble_find(const uint8_t *addr);
+
 #ifdef __cplusplus
 }
 #endif
