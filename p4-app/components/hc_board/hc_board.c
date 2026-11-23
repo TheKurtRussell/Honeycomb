@@ -80,6 +80,11 @@ esp_err_t hc_board_power_read(int *mv, int *ma)
 
 esp_err_t hc_board_usb_host_start(void)
 {
+    /* Dim the backlight before powering USB-A. The backlight is a large current
+     * draw; with WiFi+BLE also active, the USB-A power-on inrush can brown the
+     * rail out (seen in the field). Trimming to 70% frees headroom. */
+    bsp_display_brightness_set(70);
+
     /* Powers the USB-A port (USB5V_EN via the 0x44 IO expander) and installs the
      * USB host stack. USB_DEV mode = the board supplies 5 V to the plugged-in
      * device; limit_500mA = true keeps the load switch inside spec. */

@@ -1256,6 +1256,7 @@ static void ble_refresh(lv_timer_t *t)
 
     static hc_ble_dev_t devs[48];
     int n = hc_ble_get(devs, 48);
+    if (n > 24) n = 24;              /* cap rows — keep the strongest, limit churn */
 
     lv_obj_clean(s_ble_list);
     for (int i = 0; i < n; i++) {
@@ -1341,7 +1342,8 @@ static void open_ble(void)
     lv_obj_set_scrollbar_mode(s_ble_list, LV_SCROLLBAR_MODE_AUTO);
 
     if (hc_ble_ready()) hc_ble_scan(10000);         /* 10s observer scan */
-    s_tool_timer = lv_timer_create(ble_refresh, 600, NULL);  /* live refresh */
+    ble_refresh(NULL);                               /* draw immediately */
+    s_tool_timer = lv_timer_create(ble_refresh, 1500, NULL);  /* lighter refresh */
 }
 
 /* ---- radar: BLE devices placed by signal strength on a sweeping scope ---- */
@@ -1392,6 +1394,7 @@ static void radar_tick(lv_timer_t *t)
 
     static hc_ble_dev_t devs[48];
     int n = hc_ble_get(devs, 48);
+    if (n > 32) n = 32;             /* cap blips — strongest contacts, limit churn */
     lv_obj_clean(s_radar_blips);
     for (int i = 0; i < n; i++) {
         float ang = blip_angle(devs[i].addr);
