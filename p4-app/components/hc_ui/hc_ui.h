@@ -31,6 +31,8 @@ void hc_ui_add_frame(const hc_dissected_t *row);
 void hc_ui_set_energy(const hc_energy_result_t *e);
 void hc_ui_add_scan(const hc_scan_result_t *s);
 void hc_ui_set_mode(hc_radio_mode_t mode, bool ok);
+/* Set the header radio status dots (green=on, red=off). */
+void hc_ui_set_radio(bool wifi_on, bool ble_on);
 void hc_ui_set_flash_progress(const hc_flash_progress_t *p);
 void hc_ui_log(const char *line);
 

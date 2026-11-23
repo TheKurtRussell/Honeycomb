@@ -19,7 +19,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
+#include <stdlib.h>
 #include "esp_wifi.h"
+#include "esp_netif.h"
 #include "esp_log.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
@@ -51,6 +53,8 @@
 #define HC_LCYAN    0x9EE6E6   /* cyan label                     */
 #define HC_DIMTXT   0x8A7A52   /* muted text                     */
 #define HC_STRIPE   0x1A1206   /* bee stripes                    */
+#define HC_GREEN    0x3BD16F   /* indicator: active              */
+#define HC_RED      0xE0533B   /* indicator: off                 */
 
 static bool s_active;
 
@@ -72,7 +76,8 @@ static const lv_point_precise_t HEXP[] = {
     {37, 0}, {113, 0}, {150, 65}, {113, 130}, {37, 130}, {0, 65}, {37, 0}
 };
 
-static lv_obj_t *s_mode_lbl;
+static lv_obj_t *s_wifi_dot;
+static lv_obj_t *s_ble_dot;
 static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
@@ -179,6 +184,33 @@ static lv_obj_t *status_chip(lv_obj_t *parent, const char *label, const char *va
     return v;
 }
 
+/* A labelled status dot: "WIFI ●". Returns the dot so its colour can change. */
+static lv_obj_t *radio_dot(lv_obj_t *parent, const char *label)
+{
+    lv_obj_t *chip = lv_obj_create(parent);
+    lv_obj_remove_style_all(chip);
+    lv_obj_set_size(chip, 86, 44);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(chip, 10, 0);
+    lv_obj_set_style_border_color(chip, lv_color_hex(0x2A2213), 0);
+    lv_obj_set_style_border_width(chip, 1, 0);
+
+    lv_obj_t *l = lv_label_create(chip);
+    lv_label_set_text(l, label);
+    lv_obj_set_style_text_color(l, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 10, 0);
+
+    lv_obj_t *dot = lv_obj_create(chip);
+    lv_obj_remove_style_all(dot);
+    lv_obj_set_size(dot, 14, 14);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(HC_RED), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_align(dot, LV_ALIGN_RIGHT_MID, -10, 0);
+    return dot;
+}
+
 /* ---- tool views: tap a tile -> full-screen overlay with a back button ---- */
 static lv_obj_t  *s_overlay;
 static lv_obj_t  *s_comb;        /* the pannable comb container (hidden for tools, freed for the game) */
@@ -202,6 +234,12 @@ static lv_obj_t  *s_wifi_status;      /* explorer: "scanning..."/"N networks" */
 static wifi_ap_record_t s_wifi_recs[30];
 static uint16_t   s_wifi_n;
 static volatile bool s_wifi_scanning;
+static lv_obj_t  *s_conn_panel;       /* explorer: connect dialog */
+static lv_obj_t  *s_conn_pw;          /* explorer: password textarea */
+static lv_obj_t  *s_conn_kb;          /* explorer: on-screen keyboard */
+static char       s_sel_ssid[33];     /* AP chosen to connect to */
+static char       s_conn_result[72];  /* connect outcome, applied on LVGL thread */
+static volatile bool s_connecting;
 static char       s_fb_path[160];
 static char       s_log_buf[2560];
 static size_t     s_log_len;
@@ -318,6 +356,7 @@ static void close_tool(lv_event_t *e)
     s_baud_row = NULL;
     s_fb_list = s_fb_pathlbl = NULL;
     s_wifi_list = s_wifi_status = NULL;
+    s_conn_panel = s_conn_pw = s_conn_kb = NULL;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -823,7 +862,124 @@ static void open_files(void)
     fb_populate();
 }
 
-/* ---- explorer: live Wi-Fi scan via the C6 ---- */
+/* ---- explorer: live Wi-Fi scan + connect via the C6 ---- */
+
+/* Close the connect dialog. Safe from an event cb (async delete). */
+static void conn_close(void)
+{
+    if (s_conn_kb)    { lv_obj_delete_async(s_conn_kb);    s_conn_kb = NULL; }
+    if (s_conn_panel) { lv_obj_delete_async(s_conn_panel); s_conn_panel = NULL; }
+    s_conn_pw = NULL;
+}
+static void conn_cancel_cb(lv_event_t *e) { (void)e; conn_close(); }
+
+/* Applied on the LVGL thread after a connect attempt finishes. */
+static void conn_result_apply(void *p)
+{
+    (void)p;
+    if (s_wifi_status) lv_label_set_text(s_wifi_status, s_conn_result);
+}
+
+/* Off the LVGL thread: associate + wait for an IP. arg = heap copy of password. */
+static void connect_task(void *arg)
+{
+    char *pw = (char *)arg;
+    wifi_config_t cfg = { 0 };
+    strlcpy((char *)cfg.sta.ssid, s_sel_ssid, sizeof(cfg.sta.ssid));
+    strlcpy((char *)cfg.sta.password, pw ? pw : "", sizeof(cfg.sta.password));
+    free(pw);
+
+    esp_wifi_disconnect();
+    esp_wifi_set_config(WIFI_IF_STA, &cfg);
+
+    bool ok = false;
+    esp_netif_ip_info_t ip = { 0 };
+    if (esp_wifi_connect() == ESP_OK) {
+        for (int i = 0; i < 40; i++) {           /* up to ~10s for assoc + DHCP */
+            vTaskDelay(pdMS_TO_TICKS(250));
+            wifi_ap_record_t ap;
+            if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) continue;
+            esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK && ip.ip.addr) { ok = true; break; }
+        }
+    }
+    if (ok) snprintf(s_conn_result, sizeof(s_conn_result), "connected: " IPSTR, IP2STR(&ip.ip));
+    else    snprintf(s_conn_result, sizeof(s_conn_result), "connect failed: %s", s_sel_ssid);
+    s_connecting = false;
+    lv_async_call(conn_result_apply, NULL);
+    vTaskDelete(NULL);
+}
+
+static void conn_do_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_connecting) return;
+    const char *pw = s_conn_pw ? lv_textarea_get_text(s_conn_pw) : "";
+    char *pwcopy = strdup(pw ? pw : "");
+    conn_close();                               /* tear down dialog (async) */
+    if (s_wifi_status) lv_label_set_text(s_wifi_status, "connecting...");
+    s_connecting = true;
+    if (!pwcopy || xTaskCreate(connect_task, "wifi_conn", 4096, pwcopy, 4, NULL) != pdPASS) {
+        free(pwcopy);
+        s_connecting = false;
+        if (s_wifi_status) lv_label_set_text(s_wifi_status, "connect: busy");
+    }
+}
+
+/* Tap an AP row -> connect dialog (SSID + password + keyboard). */
+static void ap_row_cb(lv_event_t *e)
+{
+    if (s_conn_panel) return;
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_wifi_n) return;
+    strlcpy(s_sel_ssid, (char *)s_wifi_recs[idx].ssid, sizeof(s_sel_ssid));
+
+    s_conn_panel = lv_obj_create(s_overlay);
+    lv_obj_set_size(s_conn_panel, 560, 230);
+    lv_obj_align(s_conn_panel, LV_ALIGN_TOP_MID, 0, 150);
+    lv_obj_set_style_bg_color(s_conn_panel, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(s_conn_panel, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(s_conn_panel, 1, 0);
+    lv_obj_set_style_radius(s_conn_panel, 10, 0);
+    lv_obj_remove_flag(s_conn_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *t = lv_label_create(s_conn_panel);
+    char hdr[64]; snprintf(hdr, sizeof(hdr), "connect to %s", s_sel_ssid);
+    lv_label_set_text(t, hdr);
+    lv_obj_set_style_text_color(t, lv_color_hex(HC_HONEY), 0);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 6, 6);
+
+    s_conn_pw = lv_textarea_create(s_conn_panel);
+    lv_textarea_set_one_line(s_conn_pw, true);
+    lv_textarea_set_password_mode(s_conn_pw, true);
+    lv_textarea_set_placeholder_text(s_conn_pw, "password (blank = open)");
+    lv_obj_set_width(s_conn_pw, LV_PCT(94));
+    lv_obj_align(s_conn_pw, LV_ALIGN_TOP_MID, 0, 44);
+
+    lv_obj_t *go = lv_button_create(s_conn_panel);
+    lv_obj_set_size(go, 150, 52);
+    lv_obj_align(go, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_style_bg_color(go, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_border_color(go, lv_color_hex(HC_GREEN), 0);
+    lv_obj_set_style_border_width(go, 1, 0);
+    lv_obj_add_event_cb(go, conn_do_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *gl = lv_label_create(go); lv_label_set_text(gl, "connect");
+    lv_obj_set_style_text_color(gl, lv_color_hex(HC_GREEN), 0); lv_obj_center(gl);
+
+    lv_obj_t *cx = lv_button_create(s_conn_panel);
+    lv_obj_set_size(cx, 150, 52);
+    lv_obj_align(cx, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(cx, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_border_color(cx, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_set_style_border_width(cx, 1, 0);
+    lv_obj_add_event_cb(cx, conn_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cl = lv_label_create(cx); lv_label_set_text(cl, "cancel");
+    lv_obj_set_style_text_color(cl, lv_color_hex(HC_DIMTXT), 0); lv_obj_center(cl);
+
+    /* Keyboard parented on the overlay (bottom), bound to the password field. */
+    s_conn_kb = lv_keyboard_create(s_overlay);
+    lv_keyboard_set_textarea(s_conn_kb, s_conn_pw);
+}
 
 /* Runs on the LVGL thread (via lv_async). Fills the list from s_wifi_recs. */
 static void wifi_populate(void *p)
@@ -840,13 +996,21 @@ static void wifi_populate(void *p)
     for (int i = 0; i < s_wifi_n; i++) {
         lv_obj_t *row = lv_obj_create(s_wifi_list);
         lv_obj_remove_style_all(row);
-        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_size(row, LV_PCT(100), 36);
+        lv_obj_set_style_bg_color(row, lv_color_hex(HC_PANEL), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_radius(row, 6, 0);
+        lv_obj_set_style_pad_left(row, 8, 0);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, ap_row_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
         char line[80];
         snprintf(line, sizeof(line), "%4d dBm  ch%-2d  %s",
                  s_wifi_recs[i].rssi, s_wifi_recs[i].primary,
                  (char *)s_wifi_recs[i].ssid);
         lv_obj_t *l = lv_label_create(row);
         lv_label_set_text(l, line);
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
         /* stronger signal = warmer colour */
         uint32_t col = s_wifi_recs[i].rssi > -60 ? HC_HONEY :
                        s_wifi_recs[i].rssi > -75 ? HC_LHONEY : HC_DIMTXT;
@@ -989,9 +1153,11 @@ esp_err_t hc_ui_init(void *lv_display)
     lv_obj_align(lv_obj_get_parent(frames_chip), LV_ALIGN_RIGHT_MID, 0, 0);
     s_frames_lbl = frames_chip;
 
-    lv_obj_t *c6_chip = status_chip(hdr, "C6 RADIO", "waiting", HC_AMBER);
-    lv_obj_align(lv_obj_get_parent(c6_chip), LV_ALIGN_RIGHT_MID, -100, 0);
-    s_mode_lbl = c6_chip;
+    /* Radio status dots — reflect the live state of each radio (green=on, red=off). */
+    s_ble_dot = radio_dot(hdr, "BLE");
+    lv_obj_align(lv_obj_get_parent(s_ble_dot), LV_ALIGN_RIGHT_MID, -100, 0);
+    s_wifi_dot = radio_dot(hdr, "WIFI");
+    lv_obj_align(lv_obj_get_parent(s_wifi_dot), LV_ALIGN_RIGHT_MID, -194, 0);
 
     bsp_display_unlock();
     s_active = true;
@@ -1019,19 +1185,35 @@ void hc_ui_add_frame(const hc_dissected_t *row)
 void hc_ui_set_energy(const hc_energy_result_t *e) { (void)e; }
 void hc_ui_add_scan(const hc_scan_result_t *s)     { (void)s; }
 
-void hc_ui_set_mode(hc_radio_mode_t mode, bool ok)
+void hc_ui_set_radio(bool wifi_on, bool ble_on)
 {
 #if HAVE_LVGL
     if (!s_active) return;
-    const char *n = mode == HC_MODE_SNIFFER ? "sniffer" :
-                    mode == HC_MODE_WIFI ? "wifi" : "idle";
     if (bsp_display_lock(50)) {
-        lv_label_set_text(s_mode_lbl, ok ? n : "fail");
-        lv_obj_set_style_text_color(s_mode_lbl, lv_color_hex(ok ? HC_HONEY : HC_AMBER), 0);
+        if (s_wifi_dot)
+            lv_obj_set_style_bg_color(s_wifi_dot, lv_color_hex(wifi_on ? HC_GREEN : HC_RED), 0);
+        if (s_ble_dot)
+            lv_obj_set_style_bg_color(s_ble_dot, lv_color_hex(ble_on ? HC_GREEN : HC_RED), 0);
         bsp_display_unlock();
     }
 #else
-    (void)mode; (void)ok;
+    (void)wifi_on; (void)ble_on;
+#endif
+}
+
+/* Legacy mode setter: now just drives the Wi-Fi dot (ok -> green). */
+void hc_ui_set_mode(hc_radio_mode_t mode, bool ok)
+{
+    (void)mode;
+#if HAVE_LVGL
+    if (!s_active) return;
+    if (bsp_display_lock(50)) {
+        if (s_wifi_dot)
+            lv_obj_set_style_bg_color(s_wifi_dot, lv_color_hex(ok ? HC_GREEN : HC_RED), 0);
+        bsp_display_unlock();
+    }
+#else
+    (void)ok;
 #endif
 }
 

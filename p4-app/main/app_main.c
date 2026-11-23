@@ -103,7 +103,7 @@ void app_main(void)
     hc_storage_mount();                      /* SD on slot 0; non-fatal if absent */
 
     hc_ui_init(hc_board_lvgl_display());     /* bound to the BSP display */
-    hc_ui_set_mode(HC_MODE_WIFI, c6_up);     /* reflect the live C6 in the header */
+    hc_ui_set_radio(c6_up, false);           /* WiFi on if C6 up; BLE off (factory slave) */
 
     hc_explorer_callbacks_t ecb = { .on_row = on_row, .on_energy = on_energy,
                                     .on_scan = on_scan };
