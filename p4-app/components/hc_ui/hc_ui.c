@@ -15,6 +15,7 @@
 #include "hc_mode_manager.h"
 #include "hc_storage.h"
 #include "hc_c6ota.h"
+#include "hc_ble.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -83,7 +84,7 @@ static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
 
-enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_CAPTURE, TOOL_DECODE, TOOL_MESH, TOOL_CONFIG, TOOL_FILES };
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_DECODE, TOOL_MESH, TOOL_CONFIG, TOOL_FILES };
 
 typedef struct {
     int col, row;
@@ -100,7 +101,7 @@ static const hc_tile_t s_tiles[] = {
     {7, 2, LV_SYMBOL_DIRECTORY, "files",   HC_HONEY, HC_LHONEY, TOOL_FILES},
     {6, 3, LV_SYMBOL_LIST,     "decode",   HC_HONEY, HC_LHONEY, TOOL_DECODE},
     {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY, TOOL_BENCH},
-    {8, 3, LV_SYMBOL_SAVE,     "capture",  HC_HONEY, HC_LHONEY, TOOL_CAPTURE},
+    {8, 3, LV_SYMBOL_BLUETOOTH, "ble",     HC_CYAN,  HC_LCYAN,  TOOL_BLE},
     {6, 4, LV_SYMBOL_SETTINGS, "config",   HC_HONEY, HC_LHONEY, TOOL_CONFIG},
     {7, 4, LV_SYMBOL_SHUFFLE,  "mesh",     HC_CYAN,  HC_LCYAN,  TOOL_MESH},
     {8, 4, LV_SYMBOL_WIFI,     "explorer", HC_CYAN,  HC_LCYAN,  TOOL_EXPLORER},
@@ -232,6 +233,8 @@ static lv_obj_t  *s_fb_list;
 static lv_obj_t  *s_fb_pathlbl;
 static lv_obj_t  *s_wifi_list;        /* explorer: AP list container */
 static lv_obj_t  *s_wifi_status;      /* explorer: "scanning..."/"N networks" */
+static lv_obj_t  *s_ble_list;         /* ble: device list container */
+static lv_obj_t  *s_ble_status;       /* ble: "scanning..."/"N devices" */
 static wifi_ap_record_t s_wifi_recs[30];
 static uint16_t   s_wifi_n;
 static volatile bool s_wifi_scanning;
@@ -363,6 +366,7 @@ static void close_tool(lv_event_t *e)
     s_baud_row = NULL;
     s_fb_list = s_fb_pathlbl = NULL;
     s_wifi_list = s_wifi_status = NULL;
+    s_ble_list = s_ble_status = NULL;
     s_conn_panel = s_conn_pw = s_conn_kb = NULL;
     s_c6ota_panel = s_c6ota_status = s_c6ota_bar = NULL;
     s_tool_pending = false;
@@ -1233,6 +1237,87 @@ static void open_explorer(void)
     wifi_start_scan();
 }
 
+/* ---- ble: live BLE device scan via the C6 ---- */
+
+/* Timer on the LVGL thread: refresh the device list from hc_ble_get(). */
+static void ble_refresh(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_ble_list) return;
+
+    static hc_ble_dev_t devs[48];
+    int n = hc_ble_get(devs, 48);
+
+    lv_obj_clean(s_ble_list);
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *row = lv_obj_create(s_ble_list);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), 36);
+        lv_obj_set_style_bg_color(row, lv_color_hex(HC_PANEL), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_radius(row, 6, 0);
+        lv_obj_set_style_pad_left(row, 8, 0);
+
+        char line[80];
+        const uint8_t *a = devs[i].addr;
+        snprintf(line, sizeof(line), "%4d dBm  %02x:%02x:%02x:%02x:%02x:%02x  %s",
+                 devs[i].rssi, a[5], a[4], a[3], a[2], a[1], a[0], devs[i].name);
+        lv_obj_t *l = lv_label_create(row);
+        lv_label_set_text(l, line);
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+        uint32_t col = devs[i].rssi > -60 ? HC_HONEY :
+                       devs[i].rssi > -80 ? HC_LHONEY : HC_DIMTXT;
+        lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
+    }
+
+    if (s_ble_status) {
+        char st[32];
+        snprintf(st, sizeof(st), "%s%d devices",
+                 hc_ble_scanning() ? "scanning... " : "", n);
+        lv_label_set_text(s_ble_status, st);
+    }
+}
+
+static void ble_rescan_cb(lv_event_t *e) { (void)e; hc_ble_scan(10000); }
+
+static void open_ble(void)
+{
+    lv_obj_t *ov = tool_shell("ble");
+
+    s_ble_status = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_ble_status, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_ble_status, LV_ALIGN_TOP_LEFT, 44, 100);
+    lv_label_set_text(s_ble_status, hc_ble_ready() ? "scanning..." : "BLE not available");
+
+    lv_obj_t *rescan = lv_button_create(ov);
+    lv_obj_set_size(rescan, 120, 44);
+    lv_obj_align(rescan, LV_ALIGN_TOP_RIGHT, -44, 92);
+    lv_obj_set_style_bg_color(rescan, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(rescan, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(rescan, 1, 0);
+    lv_obj_add_event_cb(rescan, ble_rescan_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *rl = lv_label_create(rescan);
+    lv_label_set_text(rl, LV_SYMBOL_REFRESH "  scan");
+    lv_obj_set_style_text_color(rl, lv_color_hex(HC_CYAN), 0);
+    lv_obj_center(rl);
+
+    s_ble_list = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_ble_list);
+    lv_obj_set_size(s_ble_list, LV_PCT(88), 540);
+    lv_obj_align(s_ble_list, LV_ALIGN_TOP_LEFT, 44, 140);
+    lv_obj_set_style_bg_color(s_ble_list, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_bg_opa(s_ble_list, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(s_ble_list, 8, 0);
+    lv_obj_set_style_radius(s_ble_list, 8, 0);
+    lv_obj_set_flex_flow(s_ble_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_ble_list, 6, 0);
+    lv_obj_set_scroll_dir(s_ble_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_ble_list, LV_SCROLLBAR_MODE_AUTO);
+
+    if (hc_ble_ready()) hc_ble_scan(10000);         /* 10s observer scan */
+    s_tool_timer = lv_timer_create(ble_refresh, 600, NULL);  /* live refresh */
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -1243,6 +1328,7 @@ static void async_open_tool(void *p)
         case TOOL_BENCH:    open_bench(); break;
         case TOOL_FILES:    open_files(); break;
         case TOOL_EXPLORER: open_explorer(); break;
+        case TOOL_BLE:      open_ble(); break;
         default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
 }
