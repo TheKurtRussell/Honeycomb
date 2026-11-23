@@ -17,6 +17,7 @@
 #include "hc_c6ota.h"
 #include "hc_ble.h"
 #include "hc_scanlog.h"
+#include "hc_mesh.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -260,6 +261,10 @@ static lv_obj_t  *s_traf_chart;       /* traffic: live RSSI chart */
 static lv_chart_series_t *s_traf_ser; /* traffic: RSSI series */
 static uint32_t   s_traf_adv_last;    /* traffic: last advert total */
 static uint32_t   s_traf_ms_last;     /* traffic: last sample time (ms) */
+static lv_obj_t  *s_mesh_list;        /* mesh: peer list container */
+static lv_obj_t  *s_mesh_status;      /* mesh: status line */
+static lv_obj_t  *s_mesh_self;        /* mesh: this-unit label */
+static int        s_mesh_last_n;      /* mesh: last peer count (rebuild-on-change) */
 #define RADAR_MAXBLIP 48
 static lv_obj_t  *s_radar_area;       /* radar: the circular scope */
 static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
@@ -434,6 +439,9 @@ static void close_tool(lv_event_t *e)
     s_log_list = s_log_count = s_log_tab_wifi = s_log_tab_ble = NULL;
     s_traf_wifi = s_traf_ble = s_traf_chart = NULL;
     s_traf_ser = NULL;
+    hc_mesh_stop();
+    s_mesh_list = s_mesh_status = s_mesh_self = NULL;
+    s_mesh_last_n = -1;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -2133,6 +2141,97 @@ static void open_traffic(void)
     s_tool_timer = lv_timer_create(traffic_tick, 500, NULL);
 }
 
+/* ---- mesh: discover other Honeycomb units on the same WiFi LAN ---- */
+
+static void mesh_tick(lv_timer_t *t)
+{
+    (void)t;
+    static hc_mesh_peer_t peers[16];
+    int n = hc_mesh_get(peers, 16);
+
+    if (s_mesh_self) {
+        char s[64];
+        snprintf(s, sizeof(s), "this unit: %s  ·  %s",
+                 hc_mesh_self_name(),
+                 hc_mesh_self_ip()[0] ? hc_mesh_self_ip() : "no ip");
+        lv_label_set_text(s_mesh_self, s);
+    }
+    if (s_mesh_status) {
+        char s[72];
+        if (!hc_mesh_running())
+            snprintf(s, sizeof(s), "join a WiFi network (explorer) to mesh");
+        else if (n == 0)
+            snprintf(s, sizeof(s), "broadcasting... no other units yet");
+        else
+            snprintf(s, sizeof(s), "%d Honeycomb unit%s on this network", n, n == 1 ? "" : "s");
+        lv_label_set_text(s_mesh_status, s);
+    }
+
+    /* Rebuild the peer list only when the count changes (avoids object churn). */
+    if (!s_mesh_list || n == s_mesh_last_n) return;
+    s_mesh_last_n = n;
+    lv_obj_clean(s_mesh_list);
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *row = lv_obj_create(s_mesh_list);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), 52);
+        lv_obj_set_style_bg_color(row, lv_color_hex(HC_PANEL), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_radius(row, 6, 0);
+        lv_obj_set_style_pad_left(row, 8, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *l1 = lv_label_create(row);
+        char a[48];
+        snprintf(a, sizeof(a), LV_SYMBOL_SHUFFLE " %s  ·  %s", peers[i].name, peers[i].ip);
+        lv_label_set_text(l1, a);
+        lv_obj_set_style_text_color(l1, lv_color_hex(HC_LCYAN), 0);
+        lv_obj_align(l1, LV_ALIGN_TOP_LEFT, 0, 4);
+
+        lv_obj_t *l2 = lv_label_create(row);
+        char b[64];
+        snprintf(b, sizeof(b), "up %lus  ·  %lu wifi / %lu ble  ·  %lds ago",
+                 (unsigned long)peers[i].uptime_s,
+                 (unsigned long)peers[i].wifi_cnt, (unsigned long)peers[i].ble_cnt,
+                 (long)peers[i].age_s);
+        lv_label_set_text(l2, b);
+        lv_obj_set_style_text_color(l2, lv_color_hex(HC_DIMTXT), 0);
+        lv_obj_align(l2, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+    }
+}
+
+static void open_mesh(void)
+{
+    lv_obj_t *ov = tool_shell("mesh");
+
+    s_mesh_self = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_mesh_self, lv_color_hex(HC_HONEY), 0);
+    lv_obj_align(s_mesh_self, LV_ALIGN_TOP_LEFT, 44, 92);
+    lv_label_set_text(s_mesh_self, "this unit: ...");
+
+    s_mesh_status = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_mesh_status, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_mesh_status, LV_ALIGN_TOP_LEFT, 44, 118);
+    lv_label_set_text(s_mesh_status, "starting mesh...");
+
+    s_mesh_list = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_mesh_list);
+    lv_obj_set_size(s_mesh_list, LV_PCT(92), 470);
+    lv_obj_align(s_mesh_list, LV_ALIGN_TOP_MID, 0, 158);
+    lv_obj_set_flex_flow(s_mesh_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_mesh_list, 6, 0);
+    lv_obj_set_scroll_dir(s_mesh_list, LV_DIR_VER);
+
+    lv_obj_t *note = lv_label_create(ov);
+    lv_label_set_text(note, "units broadcast presence on the local network · needs 2+ on the same WiFi");
+    lv_obj_set_style_text_color(note, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(note, LV_ALIGN_BOTTOM_MID, 0, -14);
+
+    s_mesh_last_n = -1;
+    hc_mesh_start();                 /* false if no IP yet; mesh_tick reflects it */
+    s_tool_timer = lv_timer_create(mesh_tick, 1000, NULL);
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -2147,6 +2246,7 @@ static void async_open_tool(void *p)
         case TOOL_RADAR:    open_radar(); break;
         case TOOL_LOGS:     open_logbook(); break;
         case TOOL_TRAFFIC:  open_traffic(); break;
+        case TOOL_MESH:     open_mesh(); break;
         default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
 }
