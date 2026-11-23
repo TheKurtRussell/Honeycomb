@@ -45,25 +45,25 @@ static void on_mode(hc_radio_mode_t m, bool ok, uint8_t reason, void *c)
  * the app (bench, SD, UI) runs fine without the radio. Must be called AFTER the
  * C6 is powered and BEFORE the SD mounts (SD is slot 0 of the same controller;
  * ESP-Hosted claims slot 1 here). */
-static void c6_wifi_bringup(void)
+static bool c6_wifi_bringup(void)
 {
     int r = esp_hosted_init();
     if (r == 0) r = esp_hosted_connect_to_slave();
     if (r != 0) {
         ESP_LOGW(TAG, "C6 link not up (esp_hosted rc=%d) — continuing without Wi-Fi", r);
-        return;
+        return false;
     }
 
     esp_hosted_app_desc_t desc = { 0 };
     if (esp_hosted_get_coprocessor_app_desc(&desc) == ESP_OK)
         ESP_LOGW(TAG, "C6 slave: %s  ver=%s  idf=%s", desc.project_name, desc.version, desc.idf_ver);
 
-    if (esp_netif_init() != ESP_OK) return;
-    if (esp_event_loop_create_default() != ESP_OK) return;
+    if (esp_netif_init() != ESP_OK) return false;
+    if (esp_event_loop_create_default() != ESP_OK) return false;
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
-    if (esp_wifi_init(&wcfg) != ESP_OK) { ESP_LOGE(TAG, "esp_wifi_init failed"); return; }
+    if (esp_wifi_init(&wcfg) != ESP_OK) { ESP_LOGE(TAG, "esp_wifi_init failed"); return false; }
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_start();
 
@@ -79,6 +79,7 @@ static void c6_wifi_bringup(void)
                 ESP_LOGI(TAG, "  %3d dBm  ch%-2d  %s",
                          recs[i].rssi, recs[i].primary, (char *)recs[i].ssid);
     }
+    return true;
 }
 
 /* flasher -> UI */
@@ -97,11 +98,12 @@ void app_main(void)
      * auto-init is disabled (sdkconfig) so this ordering is ours to control. */
     hc_board_c6_power(true);
     vTaskDelay(pdMS_TO_TICKS(100));          /* let the C6 boot before we probe it */
-    c6_wifi_bringup();                       /* non-fatal if the C6 doesn't answer */
+    bool c6_up = c6_wifi_bringup();          /* non-fatal if the C6 doesn't answer */
 
     hc_storage_mount();                      /* SD on slot 0; non-fatal if absent */
 
     hc_ui_init(hc_board_lvgl_display());     /* bound to the BSP display */
+    hc_ui_set_mode(HC_MODE_WIFI, c6_up);     /* reflect the live C6 in the header */
 
     hc_explorer_callbacks_t ecb = { .on_row = on_row, .on_energy = on_energy,
                                     .on_scan = on_scan };

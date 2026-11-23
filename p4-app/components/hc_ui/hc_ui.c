@@ -18,6 +18,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
+#include "esp_wifi.h"
 #include "esp_log.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
@@ -195,6 +197,11 @@ static lv_obj_t  *s_flash_panel;
 static lv_obj_t  *s_baud_row;
 static lv_obj_t  *s_fb_list;
 static lv_obj_t  *s_fb_pathlbl;
+static lv_obj_t  *s_wifi_list;        /* explorer: AP list container */
+static lv_obj_t  *s_wifi_status;      /* explorer: "scanning..."/"N networks" */
+static wifi_ap_record_t s_wifi_recs[30];
+static uint16_t   s_wifi_n;
+static volatile bool s_wifi_scanning;
 static char       s_fb_path[160];
 static char       s_log_buf[2560];
 static size_t     s_log_len;
@@ -215,15 +222,16 @@ static void build_comb(void)
     lv_obj_t *cont = bare(s_scr);
     s_comb = cont;
     lv_obj_set_size(cont, LV_PCT(100), LV_PCT(100));
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(cont, LV_DIR_ALL);
-    lv_obj_set_scroll_snap_x(cont, LV_SCROLL_SNAP_NONE);
-    lv_obj_set_scroll_snap_y(cont, LV_SCROLL_SNAP_NONE);
-    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_OFF);
+    /* Static splash: no panning. The comb is laid out once and the functional
+     * node cluster is centered in the area below the header (see offset below). */
+    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *field = bare(cont);
     lv_obj_set_size(field, COMB_OX * 2 + COMB_COLS * HEX_AX + HEX_W / 4,
                            COMB_OY + COMB_ROWS * HEX_AY + HEX_H);
+
+    /* Track the bounding box of the interactive tiles so we can center them. */
+    int minx = INT_MAX, miny = INT_MAX, maxx = INT_MIN, maxy = INT_MIN;
 
     /* Pass 1 — decorative cells (dim hex outline, no wrapper, square caps). */
     for (int c = 0; c < COMB_COLS; c++) {
@@ -247,6 +255,11 @@ static void build_comb(void)
             if (!t) continue;
             int x = COMB_OX + c * HEX_AX;
             int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
+
+            if (x < minx) minx = x;
+            if (y < miny) miny = y;
+            if (x + HEX_W > maxx) maxx = x + HEX_W;
+            if (y + HEX_H > maxy) maxy = y + HEX_H;
 
             lv_obj_t *cell = bare(field);
             lv_obj_set_pos(cell, x, y);
@@ -276,14 +289,17 @@ static void build_comb(void)
 
     lv_obj_move_background(cont);   /* keep the comb below the pinned header */
 
-    /* Center the view so the comb extends in every direction from the start. */
+    /* Shift the field so the interactive-node cluster is centered in the area
+     * below the header. The decorative comb fills the rest and clips at the
+     * screen edges — a static splash, no scrolling needed. */
     lv_obj_update_layout(s_scr);
-    int vw = lv_obj_get_width(cont),  vh = lv_obj_get_height(cont);
-    int fw = lv_obj_get_width(field), fh = lv_obj_get_height(field);
-    int sx = (fw - vw) / 2, sy = (fh - vh) / 2;
-    if (sx < 0) sx = 0;
-    if (sy < 0) sy = 0;
-    lv_obj_scroll_to(cont, sx, sy, LV_ANIM_OFF);
+    int vw = lv_obj_get_width(cont), vh = lv_obj_get_height(cont);
+    if (minx <= maxx && miny <= maxy) {
+        int bbw = maxx - minx, bbh = maxy - miny;
+        int offx = (vw - bbw) / 2 - minx;
+        int offy = HDR_H + (vh - HDR_H - bbh) / 2 - miny;
+        lv_obj_set_pos(field, offx, offy);
+    }
 }
 
 static void rebuild_comb_async(void *p) { (void)p; build_comb(); }
@@ -301,6 +317,7 @@ static void close_tool(lv_event_t *e)
     s_bench_bar = NULL;
     s_baud_row = NULL;
     s_fb_list = s_fb_pathlbl = NULL;
+    s_wifi_list = s_wifi_status = NULL;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -806,16 +823,119 @@ static void open_files(void)
     fb_populate();
 }
 
+/* ---- explorer: live Wi-Fi scan via the C6 ---- */
+
+/* Runs on the LVGL thread (via lv_async). Fills the list from s_wifi_recs. */
+static void wifi_populate(void *p)
+{
+    (void)p;
+    if (!s_wifi_list || !s_wifi_status) return;    /* explorer closed meanwhile */
+    lv_obj_clean(s_wifi_list);
+
+    if (s_wifi_n == 0) {
+        lv_obj_t *e = lv_label_create(s_wifi_list);
+        lv_label_set_text(e, "no networks found");
+        lv_obj_set_style_text_color(e, lv_color_hex(HC_DIMTXT), 0);
+    }
+    for (int i = 0; i < s_wifi_n; i++) {
+        lv_obj_t *row = lv_obj_create(s_wifi_list);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        char line[80];
+        snprintf(line, sizeof(line), "%4d dBm  ch%-2d  %s",
+                 s_wifi_recs[i].rssi, s_wifi_recs[i].primary,
+                 (char *)s_wifi_recs[i].ssid);
+        lv_obj_t *l = lv_label_create(row);
+        lv_label_set_text(l, line);
+        /* stronger signal = warmer colour */
+        uint32_t col = s_wifi_recs[i].rssi > -60 ? HC_HONEY :
+                       s_wifi_recs[i].rssi > -75 ? HC_LHONEY : HC_DIMTXT;
+        lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
+    }
+
+    char st[32];
+    snprintf(st, sizeof(st), "%u networks", s_wifi_n);
+    lv_label_set_text(s_wifi_status, st);
+}
+
+/* Off the LVGL thread: block on the scan, then hand results to wifi_populate. */
+static void wifi_scan_task(void *arg)
+{
+    (void)arg;
+    uint16_t n = 0;
+    if (esp_wifi_scan_start(NULL, true) == ESP_OK && esp_wifi_scan_get_ap_num(&n) == ESP_OK) {
+        uint16_t got = n < 30 ? n : 30;
+        if (got && esp_wifi_scan_get_ap_records(&got, s_wifi_recs) == ESP_OK)
+            s_wifi_n = got;
+        else
+            s_wifi_n = 0;
+    } else {
+        s_wifi_n = 0;
+    }
+    s_wifi_scanning = false;
+    lv_async_call(wifi_populate, NULL);
+    vTaskDelete(NULL);
+}
+
+static void wifi_start_scan(void)
+{
+    if (s_wifi_scanning) return;
+    s_wifi_scanning = true;
+    if (s_wifi_status) lv_label_set_text(s_wifi_status, "scanning...");
+    if (xTaskCreate(wifi_scan_task, "wifi_scan", 4096, NULL, 4, NULL) != pdPASS)
+        s_wifi_scanning = false;
+}
+
+static void wifi_rescan_cb(lv_event_t *e) { (void)e; wifi_start_scan(); }
+
+static void open_explorer(void)
+{
+    lv_obj_t *ov = tool_shell("explorer");
+
+    s_wifi_status = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_wifi_status, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_wifi_status, LV_ALIGN_TOP_LEFT, 44, 100);
+    lv_label_set_text(s_wifi_status, "scanning...");
+
+    lv_obj_t *rescan = lv_button_create(ov);
+    lv_obj_set_size(rescan, 120, 44);
+    lv_obj_align(rescan, LV_ALIGN_TOP_RIGHT, -44, 92);
+    lv_obj_set_style_bg_color(rescan, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(rescan, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(rescan, 1, 0);
+    lv_obj_add_event_cb(rescan, wifi_rescan_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *rl = lv_label_create(rescan);
+    lv_label_set_text(rl, LV_SYMBOL_REFRESH "  scan");
+    lv_obj_set_style_text_color(rl, lv_color_hex(HC_CYAN), 0);
+    lv_obj_center(rl);
+
+    s_wifi_list = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_wifi_list);
+    lv_obj_set_size(s_wifi_list, LV_PCT(88), 540);
+    lv_obj_align(s_wifi_list, LV_ALIGN_TOP_LEFT, 44, 140);
+    lv_obj_set_style_bg_color(s_wifi_list, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_bg_opa(s_wifi_list, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(s_wifi_list, 8, 0);
+    lv_obj_set_style_radius(s_wifi_list, 8, 0);
+    lv_obj_set_flex_flow(s_wifi_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_wifi_list, 6, 0);
+    lv_obj_set_scroll_dir(s_wifi_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_wifi_list, LV_SCROLLBAR_MODE_AUTO);
+
+    wifi_start_scan();
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
     if (s_overlay) return;
     int id = (int)(intptr_t)p;
     switch (id) {
-        case TOOL_CONFIG: open_config(); break;
-        case TOOL_BENCH:  open_bench(); break;
-        case TOOL_FILES:  open_files(); break;
-        default:          open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
+        case TOOL_CONFIG:   open_config(); break;
+        case TOOL_BENCH:    open_bench(); break;
+        case TOOL_FILES:    open_files(); break;
+        case TOOL_EXPLORER: open_explorer(); break;
+        default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
 }
 
