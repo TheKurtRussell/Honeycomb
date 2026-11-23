@@ -1252,22 +1252,39 @@ static void ble_refresh(lv_timer_t *t)
     for (int i = 0; i < n; i++) {
         lv_obj_t *row = lv_obj_create(s_ble_list);
         lv_obj_remove_style_all(row);
-        lv_obj_set_size(row, LV_PCT(100), 36);
+        lv_obj_set_size(row, LV_PCT(100), 52);
         lv_obj_set_style_bg_color(row, lv_color_hex(HC_PANEL), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
         lv_obj_set_style_radius(row, 6, 0);
         lv_obj_set_style_pad_left(row, 8, 0);
 
-        char line[80];
         const uint8_t *a = devs[i].addr;
-        snprintf(line, sizeof(line), "%4d dBm  %02x:%02x:%02x:%02x:%02x:%02x  %s",
-                 devs[i].rssi, a[5], a[4], a[3], a[2], a[1], a[0], devs[i].name);
-        lv_obj_t *l = lv_label_create(row);
-        lv_label_set_text(l, line);
-        lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+        const char *ven = hc_ble_vendor(devs[i].company_id);
+        const char *kind = hc_ble_appearance_name(devs[i].appearance);
+
+        /* Top line: RSSI + best identity (name, else vendor, else unknown). */
+        const char *who = devs[i].name[0] ? devs[i].name : (ven[0] ? ven : "(unknown)");
+        char top[64];
+        snprintf(top, sizeof(top), "%4d dBm   %s", devs[i].rssi, who);
+        lv_obj_t *lt = lv_label_create(row);
+        lv_label_set_text(lt, top);
+        lv_obj_align(lt, LV_ALIGN_TOP_LEFT, 0, 4);
         uint32_t col = devs[i].rssi > -60 ? HC_HONEY :
                        devs[i].rssi > -80 ? HC_LHONEY : HC_DIMTXT;
-        lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
+        lv_obj_set_style_text_color(lt, lv_color_hex(col), 0);
+
+        /* Bottom line: MAC + tags (address privacy, type, vendor if name shown). */
+        char bot[96];
+        int o = snprintf(bot, sizeof(bot), "%02x:%02x:%02x:%02x:%02x:%02x  %s",
+                         a[5], a[4], a[3], a[2], a[1], a[0],
+                         devs[i].addr_type ? "random" : "public");
+        if (kind[0])                         o += snprintf(bot + o, sizeof(bot) - o, " · %s", kind);
+        if (devs[i].name[0] && ven[0])       o += snprintf(bot + o, sizeof(bot) - o, " · %s", ven);
+        if (devs[i].connectable)             o += snprintf(bot + o, sizeof(bot) - o, " · conn");
+        lv_obj_t *lb = lv_label_create(row);
+        lv_label_set_text(lb, bot);
+        lv_obj_align(lb, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+        lv_obj_set_style_text_color(lb, lv_color_hex(HC_DIMTXT), 0);
     }
 
     if (s_ble_status) {

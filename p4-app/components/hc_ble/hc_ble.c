@@ -21,16 +21,26 @@ static SemaphoreHandle_t s_lock;
 static volatile bool    s_ready;
 static volatile bool    s_scanning;
 
-/* Find-or-add by address, then update RSSI (and name if this report has one). */
+/* Find-or-add by address, then update RSSI/identity from this report. */
 static void add_report(const struct ble_gap_disc_desc *d)
 {
     char name[32] = "";
+    uint16_t company = 0xFFFF, appearance = 0;
     struct ble_hs_adv_fields f;
-    if (ble_hs_adv_parse_fields(&f, d->data, d->length_data) == 0 && f.name_len) {
-        int n = f.name_len < 31 ? f.name_len : 31;
-        memcpy(name, f.name, n);
-        name[n] = 0;
+    if (ble_hs_adv_parse_fields(&f, d->data, d->length_data) == 0) {
+        if (f.name_len) {
+            int n = f.name_len < 31 ? f.name_len : 31;
+            memcpy(name, f.name, n);
+            name[n] = 0;
+        }
+        if (f.mfg_data && f.mfg_data_len >= 2)
+            company = f.mfg_data[0] | (f.mfg_data[1] << 8);   /* little-endian company ID */
+        if (f.appearance_is_present)
+            appearance = f.appearance;
     }
+    /* Legacy adv event types (BT spec): 0=ADV_IND, 1=ADV_DIRECT_IND are the
+     * connectable ones; 2=SCAN_IND, 3=NONCONN_IND, 4=SCAN_RSP are not. */
+    bool conn = (d->event_type == 0 || d->event_type == 1);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     int i;
@@ -39,13 +49,78 @@ static void add_report(const struct ble_gap_disc_desc *d)
     if (i == s_ndev && s_ndev < MAXDEV) {
         s_ndev++;
         memcpy(s_dev[i].addr, d->addr.val, 6);
-        s_dev[i].name[0] = 0;
+        s_dev[i].name[0]   = 0;
+        s_dev[i].company_id = 0xFFFF;
+        s_dev[i].appearance = 0;
     }
     if (i < MAXDEV) {
-        s_dev[i].rssi = d->rssi;
-        if (name[0]) strlcpy(s_dev[i].name, name, sizeof(s_dev[i].name));
+        s_dev[i].rssi      = d->rssi;
+        s_dev[i].addr_type = d->addr.type;
+        s_dev[i].connectable = conn;
+        if (name[0])            strlcpy(s_dev[i].name, name, sizeof(s_dev[i].name));
+        if (company != 0xFFFF)  s_dev[i].company_id = company;
+        if (appearance)         s_dev[i].appearance = appearance;
     }
     xSemaphoreGive(s_lock);
+}
+
+/* BLE SIG assigned company identifiers (the common ones you'll see around). */
+const char *hc_ble_vendor(uint16_t cid)
+{
+    switch (cid) {
+        case 0x004C: return "Apple";
+        case 0x0006: return "Microsoft";
+        case 0x0075: return "Samsung";
+        case 0x00E0: return "Google";
+        case 0x0087: return "Garmin";
+        case 0x0157: return "Amazfit/Huami";
+        case 0x038F: return "Xiaomi";
+        case 0x0059: return "Nordic";
+        case 0x05A7: return "Sonos";
+        case 0x00D2: return "Logitech";
+        case 0x0171: return "Amazon";
+        case 0x0085: return "BLZ/Tile";
+        case 0x0499: return "Ruuvi";
+        case 0x0180: return "Fitbit";
+        case 0x02E5: return "Espressif";
+        case 0x0117: return "Bose";
+        case 0x004F: return "APT/Qualcomm";
+        case 0x03DA: return "Govee";
+        case 0x0646: return "JBL/Harman";
+        default:     return "";
+    }
+}
+
+/* GAP appearance categories (top 10 bits select the category). */
+const char *hc_ble_appearance_name(uint16_t a)
+{
+    if (!a) return "";
+    switch (a >> 6) {            /* category = appearance / 64 */
+        case 1:   return "phone";
+        case 2:   return "computer";
+        case 3:   return "watch";
+        case 4:   return "clock";
+        case 5:   return "display";
+        case 6:   return "remote";
+        case 7:   return "glasses";
+        case 8:   return "tag";
+        case 9:   return "keyring";
+        case 10:  return "media player";
+        case 11:  return "barcode";
+        case 15:  return "thermometer";
+        case 16:  return "heart rate";
+        case 17:  return "blood pressure";
+        case 18:  return "HID";
+        case 19:  return "glucose";
+        case 20:  return "running";
+        case 21:  return "cycling";
+        case 49:  return "pulse ox";
+        case 51:  return "weight scale";
+        case 64:  return "earbuds";
+        case 65:  return "headset";
+        case 66:  return "speaker";
+        default:  return "device";
+    }
 }
 
 static int gap_cb(struct ble_gap_event *e, void *arg)

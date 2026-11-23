@@ -17,10 +17,19 @@ extern "C" {
 #endif
 
 typedef struct {
-    uint8_t addr[6];
-    int8_t  rssi;
-    char    name[32];   /* "" if the advertiser sent no name */
+    uint8_t  addr[6];
+    int8_t   rssi;
+    uint8_t  addr_type;   /* 0 = public (OUI-identifiable), else random/private */
+    uint16_t company_id;  /* BLE SIG company ID from mfg data, 0xFFFF if none */
+    uint16_t appearance;  /* GAP appearance, 0 if not advertised */
+    bool     connectable; /* advertiser accepts connections */
+    char     name[32];    /* "" if the advertiser sent no name */
 } hc_ble_dev_t;
+
+/* Human-readable vendor for a BLE SIG company ID ("" if unknown). */
+const char *hc_ble_vendor(uint16_t company_id);
+/* Human-readable device kind for a GAP appearance value ("" if unknown/0). */
+const char *hc_ble_appearance_name(uint16_t appearance);
 
 /* Bring up the NimBLE host bound to the C6 controller. Returns true if the
  * stack started (the controller syncs asynchronously; see hc_ble_ready). */
