@@ -18,6 +18,7 @@
 #include "hc_ble.h"
 #include "hc_scanlog.h"
 #include "hc_mesh.h"
+#include "hc_sigs.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -96,7 +97,7 @@ static lv_obj_t *s_wifi_dot;
 static lv_obj_t *s_ble_dot;
 
 
-enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS, TOOL_TRAFFIC };
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS, TOOL_TRAFFIC, TOOL_SURV };
 
 typedef struct {
     int col, row;
@@ -113,6 +114,7 @@ static const hc_tile_t s_tiles[] = {
     {6, 2, LV_SYMBOL_CHARGE,   "traffic",  HC_CYAN,  HC_LCYAN,  TOOL_TRAFFIC},
     {7, 2, LV_SYMBOL_DIRECTORY, "files",   HC_HONEY, HC_LHONEY, TOOL_FILES},
     {8, 2, LV_SYMBOL_LIST,     "logbook",  HC_HONEY, HC_LHONEY, TOOL_LOGS},
+    {9, 3, LV_SYMBOL_EYE_OPEN, "surveil",  HC_CYAN,  HC_LCYAN,  TOOL_SURV},
     {6, 3, LV_SYMBOL_GPS,      "radar",    HC_CYAN,  HC_LCYAN,  TOOL_RADAR},
     {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY, TOOL_BENCH},
     {8, 3, LV_SYMBOL_BLUETOOTH, "ble",     HC_CYAN,  HC_LCYAN,  TOOL_BLE},
@@ -265,6 +267,9 @@ static lv_obj_t  *s_mesh_list;        /* mesh: peer list container */
 static lv_obj_t  *s_mesh_status;      /* mesh: status line */
 static lv_obj_t  *s_mesh_self;        /* mesh: this-unit label */
 static int        s_mesh_last_n;      /* mesh: last peer count (rebuild-on-change) */
+static lv_obj_t  *s_surv_list;        /* surveillance: flagged-device list */
+static lv_obj_t  *s_surv_status;      /* surveillance: status line */
+static int        s_surv_last_n;      /* surveillance: last hit count */
 #define RADAR_MAXBLIP 48
 static lv_obj_t  *s_radar_area;       /* radar: the circular scope */
 static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
@@ -447,6 +452,8 @@ static void close_tool(lv_event_t *e)
     hc_mesh_stop();
     s_mesh_list = s_mesh_status = s_mesh_self = NULL;
     s_mesh_last_n = -1;
+    s_surv_list = s_surv_status = NULL;
+    s_surv_last_n = -1;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -2332,6 +2339,116 @@ static void open_mesh(void)
     s_tool_timer = lv_timer_create(mesh_tick, 1000, NULL);
 }
 
+/* ---- surveillance detector: flag fixed surveillance gear (Flock ALPR) ---- */
+
+static void surv_tick(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_surv_list) return;
+
+    static hc_scanlog_entry_t rows[128];
+    int n = hc_scanlog_get_wifi(rows, 128);
+
+    /* Collect hits (highest confidence first by scanning twice). */
+    int hits = 0;
+    for (int i = 0; i < n; i++)
+        if (hc_sig_wifi(rows[i].label, rows[i].mac) != HC_SIG_NONE) hits++;
+
+    if (s_surv_status) {
+        char st[72];
+        if (hits == 0) snprintf(st, sizeof(st), "no Flock signatures in %d networks seen", n);
+        else           snprintf(st, sizeof(st), "%d possible surveillance device%s", hits, hits==1?"":"s");
+        lv_label_set_text(s_surv_status, st);
+        lv_obj_set_style_text_color(s_surv_status, lv_color_hex(hits?HC_RED:HC_CYAN), 0);
+    }
+
+    if (hits == s_surv_last_n) return;      /* rebuild only on change */
+    s_surv_last_n = hits;
+    lv_obj_clean(s_surv_list);
+
+    if (hits == 0) {
+        lv_obj_t *e = lv_label_create(s_surv_list);
+        lv_label_set_text(e,
+            "nothing flagged yet\nopen the explorer or hit scan to sweep WiFi\n"
+            "(current Flock units hide on probe requests —\nreliable capture needs the C6 monitor mode)");
+        lv_obj_set_style_text_color(e, lv_color_hex(HC_DIMTXT), 0);
+        return;
+    }
+
+    for (int pass = 2; pass >= 1; pass--)   /* high-confidence rows first */
+        for (int i = 0; i < n; i++) {
+            int sig = hc_sig_wifi(rows[i].label, rows[i].mac);
+            if (hc_sig_confidence(sig) != pass) continue;
+
+            lv_obj_t *row = lv_obj_create(s_surv_list);
+            lv_obj_remove_style_all(row);
+            lv_obj_set_size(row, LV_PCT(100), 52);
+            lv_obj_set_style_bg_color(row, lv_color_hex(HC_PANEL), 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+            lv_obj_set_style_radius(row, 6, 0);
+            lv_obj_set_style_pad_left(row, 8, 0);
+            uint32_t accent = (pass == 2) ? HC_RED : HC_AMBERW;
+            lv_obj_set_style_border_color(row, lv_color_hex(accent), 0);
+            lv_obj_set_style_border_width(row, 1, 0);
+
+            lv_obj_t *l1 = lv_label_create(row);
+            char a[80];
+            snprintf(a, sizeof(a), LV_SYMBOL_EYE_OPEN " %s  —  %s",
+                     rows[i].label[0] ? rows[i].label : "(hidden ssid)", hc_sig_label(sig));
+            lv_label_set_text(l1, a);
+            lv_obj_set_style_text_color(l1, lv_color_hex(accent), 0);
+            lv_obj_align(l1, LV_ALIGN_TOP_LEFT, 0, 4);
+
+            lv_obj_t *l2 = lv_label_create(row);
+            char b[72];
+            snprintf(b, sizeof(b),
+                     "%02X:%02X:%02X:%02X:%02X:%02X  ·  %ddBm  ·  ch %d",
+                     rows[i].mac[0], rows[i].mac[1], rows[i].mac[2],
+                     rows[i].mac[3], rows[i].mac[4], rows[i].mac[5],
+                     rows[i].rssi_best, rows[i].channel);
+            lv_label_set_text(l2, b);
+            lv_obj_set_style_text_color(l2, lv_color_hex(HC_DIMTXT), 0);
+            lv_obj_align(l2, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+        }
+}
+
+static void surv_scan_cb(lv_event_t *e) { (void)e; wifi_start_scan(); }
+
+static void open_surv(void)
+{
+    lv_obj_t *ov = tool_shell("surveillance");
+
+    s_surv_status = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_surv_status, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_surv_status, LV_ALIGN_TOP_LEFT, 44, 100);
+    lv_label_set_text(s_surv_status, "sweeping...");
+
+    lv_obj_t *scan = lv_button_create(ov);
+    lv_obj_set_size(scan, 130, 44);
+    lv_obj_align(scan, LV_ALIGN_TOP_RIGHT, -44, 92);
+    lv_obj_set_style_bg_color(scan, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(scan, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(scan, 1, 0);
+    lv_obj_add_event_cb(scan, surv_scan_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *sl = lv_label_create(scan);
+    lv_label_set_text(sl, LV_SYMBOL_REFRESH "  scan");
+    lv_obj_set_style_text_color(sl, lv_color_hex(HC_CYAN), 0);
+    lv_obj_center(sl);
+
+    s_surv_list = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_surv_list);
+    lv_obj_set_size(s_surv_list, LV_PCT(92), 500);
+    lv_obj_align(s_surv_list, LV_ALIGN_TOP_MID, 0, 140);
+    lv_obj_set_flex_flow(s_surv_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_surv_list, 6, 0);
+    lv_obj_set_scroll_dir(s_surv_list, LV_DIR_VER);
+
+    s_surv_last_n = -1;
+    wifi_start_scan();                        /* kick a fresh sweep */
+    surv_tick(NULL);                          /* draw from the logbook now */
+    s_tool_timer = lv_timer_create(surv_tick, 1500, NULL);
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -2346,6 +2463,7 @@ static void async_open_tool(void *p)
         case TOOL_RADAR:    open_radar(); break;
         case TOOL_LOGS:     open_logbook(); break;
         case TOOL_TRAFFIC:  open_traffic(); break;
+        case TOOL_SURV:     open_surv(); break;
         case TOOL_MESH:     open_mesh(); break;
         default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
