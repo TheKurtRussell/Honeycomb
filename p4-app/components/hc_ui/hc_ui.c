@@ -254,7 +254,7 @@ static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
 static lv_obj_t  *s_radar_blips;      /* radar: container for device blips */
 static lv_obj_t  *s_radar_blip[RADAR_MAXBLIP]; /* fixed blip pool (no churn) */
 static lv_obj_t  *s_radar_info;       /* radar: status/closest-device label */
-static float      s_radar_ang;        /* radar: current sweep angle (rad) */
+static float      s_radar_ang;        /* radar: current rake bearing (deg) */
 static int        s_radar_tick;       /* radar: tick counter for data refresh */
 static hc_ble_dev_t s_radar_devs[RADAR_MAXBLIP]; /* snapshot behind the blips */
 static int        s_radar_n;          /* count in s_radar_devs */
@@ -1550,23 +1550,35 @@ static void open_ble(void)
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-#define RADAR_SZ  580
-#define RADAR_C   290            /* center x/y within the area */
-#define RADAR_R   268            /* outer ring radius */
-#define RSSI_NEAR (-35)          /* maps to the centre */
-#define RSSI_FAR  (-100)         /* maps to the outer ring */
+/* Sector-sweep sonar: a fan that opens downward from a pivot near the top of
+ * the panel, with curved range arcs and a leading edge that rakes back and
+ * forth across the sector.  Honeycomb palette (honey sweep, cyan structure). */
+#define RADAR_W    860           /* plot area, wide to suit the landscape panel */
+#define RADAR_H    480
+#define RADAR_PX   430           /* pivot x (fan apex, top-centre) */
+#define RADAR_PY   28            /* pivot y (fan apex, near the top) */
+#define RADAR_R    448           /* reach, apex -> far arc */
+#define RADAR_A0   30.0f         /* fan edge angles, degrees (lv_arc convention: */
+#define RADAR_A1   150.0f        /*   0 = 3 o'clock, CW, so 90 = straight down)  */
+#define RSSI_NEAR (-35)          /* maps to the apex */
+#define RSSI_FAR  (-100)         /* maps to the far arc */
+
+#define D2R(d) ((d) * (float)M_PI / 180.0f)
 
 static lv_point_precise_t s_sweep_pts[2];
+static float s_radar_dir = 1.0f; /* sweep direction for the ping-pong rake */
 
-/* Stable angle (radians) for a device from its address, so each keeps its place. */
+/* Stable bearing (degrees, within the fan) for a device from its address, so
+ * each contact keeps its place across ticks. */
 static float blip_angle(const uint8_t *a)
 {
     uint32_t h = 2166136261u;
     for (int i = 0; i < 6; i++) h = (h ^ a[i]) * 16777619u;
-    return (float)(h % 3600) / 10.0f * (float)M_PI / 180.0f;
+    float t = (float)(h % 1000) / 1000.0f;             /* 0..1 across the fan */
+    return RADAR_A0 + t * (RADAR_A1 - RADAR_A0);
 }
 
-/* Radius for an RSSI: strong -> centre, weak -> edge. */
+/* Range for an RSSI: strong -> apex, weak -> far arc. */
 static float blip_radius(int rssi)
 {
     float t = (float)(RSSI_NEAR - rssi) / (float)(RSSI_NEAR - RSSI_FAR);
@@ -1697,13 +1709,15 @@ static void radar_tick(lv_timer_t *t)
     (void)t;
     if (!s_radar_area) return;
 
-    /* Rotate the sweep line. */
-    s_radar_ang += 0.09f;
-    if (s_radar_ang > 2 * (float)M_PI) s_radar_ang -= 2 * (float)M_PI;
-    s_sweep_pts[0].x = RADAR_C;
-    s_sweep_pts[0].y = RADAR_C;
-    s_sweep_pts[1].x = RADAR_C + (lv_value_precise_t)(RADAR_R * cosf(s_radar_ang));
-    s_sweep_pts[1].y = RADAR_C + (lv_value_precise_t)(RADAR_R * sinf(s_radar_ang));
+    /* Rake the leading edge back and forth across the fan (degrees). */
+    s_radar_ang += s_radar_dir * 1.4f;
+    if (s_radar_ang >= RADAR_A1) { s_radar_ang = RADAR_A1; s_radar_dir = -1.0f; }
+    if (s_radar_ang <= RADAR_A0) { s_radar_ang = RADAR_A0; s_radar_dir =  1.0f; }
+    float sr = D2R(s_radar_ang);
+    s_sweep_pts[0].x = RADAR_PX;
+    s_sweep_pts[0].y = RADAR_PY;
+    s_sweep_pts[1].x = RADAR_PX + (lv_value_precise_t)(RADAR_R * cosf(sr));
+    s_sweep_pts[1].y = RADAR_PY + (lv_value_precise_t)(RADAR_R * sinf(sr));
     if (s_radar_sweep) lv_line_set_points(s_radar_sweep, s_sweep_pts, 2);
 
     /* Reposition the fixed blip pool from the live table ~ every 720ms. No
@@ -1717,15 +1731,16 @@ static void radar_tick(lv_timer_t *t)
         lv_obj_t *b = s_radar_blip[i];
         if (!b) continue;
         if (i >= n) { lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN); continue; }
-        float ang = blip_angle(s_radar_devs[i].addr);
+        float ang = D2R(blip_angle(s_radar_devs[i].addr));
         float r   = blip_radius(s_radar_devs[i].rssi);
-        int x = RADAR_C + (int)(r * cosf(ang));
-        int y = RADAR_C + (int)(r * sinf(ang));
+        int x = RADAR_PX + (int)(r * cosf(ang));
+        int y = RADAR_PY + (int)(r * sinf(ang));
         int sz = s_radar_devs[i].rssi > -55 ? 16 : s_radar_devs[i].rssi > -75 ? 12 : 9;
         lv_obj_set_size(b, sz, sz);
         lv_obj_set_pos(b, x - sz / 2, y - sz / 2);
-        uint32_t col = s_radar_devs[i].rssi > -60 ? HC_SCAN :
-                       s_radar_devs[i].rssi > -80 ? HC_GREEN : HC_SCANDIM;
+        /* Strong contacts glow honey, fading to dim cyan at the far edge. */
+        uint32_t col = s_radar_devs[i].rssi > -60 ? HC_HONEY :
+                       s_radar_devs[i].rssi > -80 ? HC_CYAN : HC_SCANDIM;
         lv_obj_set_style_bg_color(b, lv_color_hex(col), 0);
         lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
     }
@@ -1752,55 +1767,64 @@ static void open_radar(void)
     lv_obj_t *ov = tool_shell("radar");
 
     s_radar_info = lv_label_create(ov);
-    lv_obj_set_style_text_color(s_radar_info, lv_color_hex(HC_SCAN), 0);
+    lv_obj_set_style_text_color(s_radar_info, lv_color_hex(HC_CYAN), 0);
     lv_obj_align(s_radar_info, LV_ALIGN_TOP_LEFT, 44, 100);
     lv_label_set_text(s_radar_info, hc_ble_ready() ? "scanning..." : "BLE not available");
 
     s_radar_area = lv_obj_create(ov);
     lv_obj_remove_style_all(s_radar_area);
-    lv_obj_set_size(s_radar_area, RADAR_SZ, RADAR_SZ);
-    lv_obj_align(s_radar_area, LV_ALIGN_CENTER, 0, 24);
+    lv_obj_set_size(s_radar_area, RADAR_W, RADAR_H);
+    lv_obj_align(s_radar_area, LV_ALIGN_CENTER, 0, 40);
     lv_obj_remove_flag(s_radar_area, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Concentric range rings. */
+    /* Curved range arcs fanning down from the apex (far arc brightest). */
     for (int k = 1; k <= 4; k++) {
-        int d = (RADAR_R * k / 4) * 2;
-        lv_obj_t *ring = lv_obj_create(s_radar_area);
-        lv_obj_remove_style_all(ring);
-        lv_obj_set_size(ring, d, d);
-        lv_obj_set_pos(ring, RADAR_C - d / 2, RADAR_C - d / 2);
-        lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_color(ring, lv_color_hex(HC_SCANDIM), 0);
-        lv_obj_set_style_border_width(ring, 1, 0);
-        lv_obj_set_style_border_opa(ring, LV_OPA_COVER, 0);
+        int rr = RADAR_R * k / 4;
+        int d  = rr * 2;
+        lv_obj_t *arc = lv_arc_create(s_radar_area);
+        lv_obj_remove_style_all(arc);
+        lv_obj_set_size(arc, d, d);
+        lv_obj_set_pos(arc, RADAR_PX - rr, RADAR_PY - rr);
+        lv_arc_set_rotation(arc, 0);
+        lv_arc_set_bg_angles(arc, (int)RADAR_A0, (int)RADAR_A1);
+        lv_obj_remove_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_arc_width(arc, k == 4 ? 2 : 1, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(arc, lv_color_hex(k == 4 ? HC_CYAN : HC_STRIPE),
+                                   LV_PART_MAIN);
+        lv_obj_set_style_arc_opa(arc, k == 4 ? LV_OPA_80 : LV_OPA_50, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(arc, 0, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(arc, LV_OPA_0, LV_PART_KNOB);
     }
-    /* Crosshair bars through the centre. */
-    lv_obj_t *hbar = lv_obj_create(s_radar_area);
-    lv_obj_remove_style_all(hbar);
-    lv_obj_set_size(hbar, RADAR_R * 2, 1);
-    lv_obj_set_pos(hbar, RADAR_C - RADAR_R, RADAR_C);
-    lv_obj_set_style_bg_color(hbar, lv_color_hex(HC_SCANDIM), 0);
-    lv_obj_set_style_bg_opa(hbar, LV_OPA_COVER, 0);
-    lv_obj_t *vbar = lv_obj_create(s_radar_area);
-    lv_obj_remove_style_all(vbar);
-    lv_obj_set_size(vbar, 1, RADAR_R * 2);
-    lv_obj_set_pos(vbar, RADAR_C, RADAR_C - RADAR_R);
-    lv_obj_set_style_bg_color(vbar, lv_color_hex(HC_SCANDIM), 0);
-    lv_obj_set_style_bg_opa(vbar, LV_OPA_COVER, 0);
 
-    /* Sweep line. */
-    s_sweep_pts[0].x = s_sweep_pts[1].x = RADAR_C;
-    s_sweep_pts[0].y = s_sweep_pts[1].y = RADAR_C;
+    /* Fan edge radials and a faint centre bearing line. */
+    const float edges[3] = { RADAR_A0, 90.0f, RADAR_A1 };
+    for (int e = 0; e < 3; e++) {
+        static lv_point_precise_t ep[3][2];
+        float a = D2R(edges[e]);
+        ep[e][0].x = RADAR_PX;
+        ep[e][0].y = RADAR_PY;
+        ep[e][1].x = RADAR_PX + (lv_value_precise_t)(RADAR_R * cosf(a));
+        ep[e][1].y = RADAR_PY + (lv_value_precise_t)(RADAR_R * sinf(a));
+        lv_obj_t *ln = lv_line_create(s_radar_area);
+        lv_line_set_points(ln, ep[e], 2);
+        lv_obj_set_style_line_color(ln, lv_color_hex(HC_STRIPE), 0);
+        lv_obj_set_style_line_width(ln, 1, 0);
+        lv_obj_set_style_line_opa(ln, e == 1 ? LV_OPA_30 : LV_OPA_60, 0);
+    }
+
+    /* Sweep (leading edge of the rake). */
+    s_sweep_pts[0].x = s_sweep_pts[1].x = RADAR_PX;
+    s_sweep_pts[0].y = s_sweep_pts[1].y = RADAR_PY;
     s_radar_sweep = lv_line_create(s_radar_area);
     lv_line_set_points(s_radar_sweep, s_sweep_pts, 2);
-    lv_obj_set_style_line_color(s_radar_sweep, lv_color_hex(HC_SCAN), 0);
+    lv_obj_set_style_line_color(s_radar_sweep, lv_color_hex(HC_HONEY), 0);
     lv_obj_set_style_line_width(s_radar_sweep, 2, 0);
     lv_obj_set_style_line_rounded(s_radar_sweep, true, 0);
 
     /* Blip layer on top. */
     s_radar_blips = lv_obj_create(s_radar_area);
     lv_obj_remove_style_all(s_radar_blips);
-    lv_obj_set_size(s_radar_blips, RADAR_SZ, RADAR_SZ);
+    lv_obj_set_size(s_radar_blips, RADAR_W, RADAR_H);
     lv_obj_set_pos(s_radar_blips, 0, 0);
     lv_obj_remove_flag(s_radar_blips, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -1818,7 +1842,8 @@ static void open_radar(void)
         s_radar_blip[i] = b;
     }
 
-    s_radar_ang = 0;
+    s_radar_ang = RADAR_A0;
+    s_radar_dir = 1.0f;
     s_radar_tick = 0;
     if (hc_ble_ready() && !hc_ble_scanning()) hc_ble_scan(0);   /* continuous */
     s_tool_timer = lv_timer_create(radar_tick, 80, NULL);
