@@ -14,6 +14,7 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
+#include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -85,10 +86,26 @@ static bool c6_wifi_bringup(void)
 /* flasher -> UI */
 static void on_flash(const hc_flash_progress_t *p, void *c) { hc_ui_set_flash_progress(p); }
 
+/* Report the staged C6 slave image in the c6fw partition (Stage 2a check).
+ * A valid ESP app image begins with magic byte 0xE9. This verifies the web
+ * flasher delivered the slave image before we build the OTA that streams it. */
+static void c6fw_report(void)
+{
+    const esp_partition_t *p =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40, "c6fw");
+    if (!p) { ESP_LOGW(TAG, "c6fw partition not found"); return; }
+    uint8_t magic = 0;
+    esp_partition_read(p, 0, &magic, 1);
+    ESP_LOGI(TAG, "c6fw: %lu KB partition, staged image magic=0x%02x (%s)",
+             (unsigned long)(p->size / 1024), magic,
+             magic == 0xE9 ? "valid app image" : "EMPTY/invalid");
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Honeycomb P4 app 0.1.0");
     ESP_ERROR_CHECK(nvs_flash_init());
+    c6fw_report();
 
     ESP_ERROR_CHECK(hc_board_init());        /* display BSP (headless until bound) */
 

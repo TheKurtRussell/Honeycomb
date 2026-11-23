@@ -60,6 +60,18 @@ jobs:
           name: honeycomb-${{ matrix.name }}
           path: merged-${{ matrix.name }}.bin
 
+      # The C6 slave's raw app image (not merged) — this is what gets staged in
+      # the P4's c6fw partition and streamed to the C6 over SDIO via OTA.
+      - name: Stage C6 slave app image
+        if: matrix.name == 'c6'
+        run: cp ${{ matrix.path }}/build/honeycomb_c6_hosted.bin c6fw.bin
+      - name: Upload C6 slave app image
+        if: matrix.name == 'c6'
+        uses: actions/upload-artifact@v4
+        with:
+          name: honeycomb-c6fw
+          path: c6fw.bin
+
   pages:
     needs: build
     runs-on: ubuntu-latest
@@ -78,6 +90,10 @@ jobs:
           cp -r webflasher/* _site/
           cp _artifacts/honeycomb-p4/merged-p4.bin _site/merged-p4.bin
           cp _artifacts/honeycomb-c6/merged-c6.bin _site/merged-c6.bin
+          # Stage the C6 slave app image as a second flasher part (written to the
+          # P4's c6fw partition at 0x720000). The web flasher writes both parts;
+          # the P4 later streams c6fw to the C6 over SDIO (host-driven OTA).
+          cp _artifacts/honeycomb-c6fw/c6fw.bin _site/c6fw.bin
           # Cache-bust: the firmware and manifest have fixed names, so browsers
           # and the Pages CDN happily serve a stale merged-p4.bin after a new
           # build (you flash, nothing changes, same crash). Stamp the short
@@ -87,6 +103,7 @@ jobs:
           SHA="${GITHUB_SHA::7}"
           echo "Stamping build $SHA into flasher"
           sed -i "s|merged-p4.bin|merged-p4.bin?v=$SHA|g" _site/manifest-p4.json
+          sed -i "s|c6fw.bin|c6fw.bin?v=$SHA|g" _site/manifest-p4.json
           sed -i "s|\"version\": \"[^\"]*\"|\"version\": \"$SHA\"|" _site/manifest-p4.json
           # index.html fetches the manifest with a runtime ?t=now (see its
           # script), so no build-time query is needed there — just stamp the SHA.
