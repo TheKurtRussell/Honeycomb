@@ -1,4 +1,5 @@
 #include "hc_ble.h"
+#include "hc_scanlog.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -62,6 +63,10 @@ static void add_report(const struct ble_gap_disc_desc *d)
         if (appearance)         s_dev[i].appearance = appearance;
     }
     xSemaphoreGive(s_lock);
+
+    /* Logbook: record every unique sighting (dedups + appends to SD itself).
+     * Done outside s_lock so SD I/O never stalls the BLE device table. */
+    hc_scanlog_ble(d->addr.val, d->rssi, company, name);
 }
 
 /* BLE SIG assigned company identifiers (the common ones you'll see around). */

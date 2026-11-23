@@ -183,6 +183,18 @@ esp_err_t hc_storage_copy(const char *src, const char *dst)
     return ret;
 }
 
+esp_err_t hc_storage_append(const char *path, const char *text)
+{
+    if (!path || !text) return ESP_ERR_INVALID_ARG;
+    if (!s_mounted) return ESP_ERR_INVALID_STATE;
+    FILE *f = fopen(path, "a");
+    if (!f) return ESP_FAIL;
+    size_t len = strlen(text);
+    size_t w = fwrite(text, 1, len, f);
+    fclose(f);
+    return (w == len) ? ESP_OK : ESP_FAIL;
+}
+
 esp_err_t hc_storage_save_log(const char *text, char *path_out, size_t cap)
 {
     if (!s_mounted) return ESP_ERR_INVALID_STATE;

@@ -16,6 +16,7 @@
 #include "hc_storage.h"
 #include "hc_c6ota.h"
 #include "hc_ble.h"
+#include "hc_scanlog.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -92,11 +93,9 @@ static const lv_point_precise_t HEXP[] = {
 
 static lv_obj_t *s_wifi_dot;
 static lv_obj_t *s_ble_dot;
-static lv_obj_t *s_frames_lbl;
-static uint32_t  s_frame_count;
 
 
-enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES };
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS };
 
 typedef struct {
     int col, row;
@@ -111,6 +110,7 @@ typedef struct {
  * every direction from the start. Every other cell is an empty comb cell. */
 static const hc_tile_t s_tiles[] = {
     {7, 2, LV_SYMBOL_DIRECTORY, "files",   HC_HONEY, HC_LHONEY, TOOL_FILES},
+    {8, 2, LV_SYMBOL_LIST,     "logbook",  HC_HONEY, HC_LHONEY, TOOL_LOGS},
     {6, 3, LV_SYMBOL_GPS,      "radar",    HC_CYAN,  HC_LCYAN,  TOOL_RADAR},
     {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY, TOOL_BENCH},
     {8, 3, LV_SYMBOL_BLUETOOTH, "ble",     HC_CYAN,  HC_LCYAN,  TOOL_BLE},
@@ -248,6 +248,11 @@ static lv_obj_t  *s_wifi_list;        /* explorer: AP list container */
 static lv_obj_t  *s_wifi_status;      /* explorer: "scanning..."/"N networks" */
 static lv_obj_t  *s_ble_list;         /* ble: device list container */
 static lv_obj_t  *s_ble_status;       /* ble: "scanning..."/"N devices" */
+static lv_obj_t  *s_log_list;         /* logbook: scrollable rows */
+static lv_obj_t  *s_log_count;        /* logbook: header count label */
+static lv_obj_t  *s_log_tab_wifi;     /* logbook: tab buttons */
+static lv_obj_t  *s_log_tab_ble;
+static bool       s_log_show_ble;     /* logbook: which table is shown */
 #define RADAR_MAXBLIP 48
 static lv_obj_t  *s_radar_area;       /* radar: the circular scope */
 static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
@@ -419,6 +424,7 @@ static void close_tool(lv_event_t *e)
     s_ble_last_n = -1;
     s_conn_panel = s_conn_pw = s_conn_kb = NULL;
     s_c6ota_panel = s_c6ota_status = s_c6ota_bar = NULL;
+    s_log_list = s_log_count = s_log_tab_wifi = s_log_tab_ble = NULL;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -1373,10 +1379,17 @@ static void wifi_scan_task(void *arg)
     uint16_t n = 0;
     if (esp_wifi_scan_start(NULL, true) == ESP_OK && esp_wifi_scan_get_ap_num(&n) == ESP_OK) {
         uint16_t got = n < 30 ? n : 30;
-        if (got && esp_wifi_scan_get_ap_records(&got, s_wifi_recs) == ESP_OK)
+        if (got && esp_wifi_scan_get_ap_records(&got, s_wifi_recs) == ESP_OK) {
             s_wifi_n = got;
-        else
+            /* Logbook: record each AP (dedups by BSSID, appends to SD on first). */
+            for (int i = 0; i < got; i++)
+                hc_scanlog_wifi((const char *)s_wifi_recs[i].ssid,
+                                s_wifi_recs[i].bssid,
+                                s_wifi_recs[i].rssi,
+                                s_wifi_recs[i].primary);
+        } else {
             s_wifi_n = 0;
+        }
     } else {
         s_wifi_n = 0;
     }
@@ -1555,11 +1568,12 @@ static void open_ble(void)
  * forth across the sector.  Honeycomb palette (honey sweep, cyan structure). */
 #define RADAR_W    860           /* plot area, wide to suit the landscape panel */
 #define RADAR_H    480
-#define RADAR_PX   430           /* pivot x (fan apex, top-centre) */
-#define RADAR_PY   28            /* pivot y (fan apex, near the top) */
+#define RADAR_PX   430           /* pivot x (fan apex, bottom-centre: nearest you) */
+#define RADAR_PY   452           /* pivot y (fan apex, near the bottom edge) */
 #define RADAR_R    448           /* reach, apex -> far arc */
-#define RADAR_A0   30.0f         /* fan edge angles, degrees (lv_arc convention: */
-#define RADAR_A1   150.0f        /*   0 = 3 o'clock, CW, so 90 = straight down)  */
+#define RADAR_A0   210.0f        /* fan edge angles, degrees (lv_arc convention: */
+#define RADAR_A1   330.0f        /*  0 = 3 o'clock, CW, so 270 = straight up/away) */
+#define RADAR_AC   270.0f        /* centre bearing (straight up / away) */
 #define RSSI_NEAR (-35)          /* maps to the apex */
 #define RSSI_FAR  (-100)         /* maps to the far arc */
 
@@ -1797,7 +1811,7 @@ static void open_radar(void)
     }
 
     /* Fan edge radials and a faint centre bearing line. */
-    const float edges[3] = { RADAR_A0, 90.0f, RADAR_A1 };
+    const float edges[3] = { RADAR_A0, RADAR_AC, RADAR_A1 };
     for (int e = 0; e < 3; e++) {
         static lv_point_precise_t ep[3][2];
         float a = D2R(edges[e]);
@@ -1838,6 +1852,9 @@ static void open_radar(void)
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
         lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        /* Dots are tiny (9-16px); grow the touch target well past the pixels so
+         * a fingertip reliably lands a selection -> foxhunt. */
+        lv_obj_set_ext_click_area(b, 22);
         lv_obj_add_event_cb(b, blip_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         s_radar_blip[i] = b;
     }
@@ -1847,6 +1864,139 @@ static void open_radar(void)
     s_radar_tick = 0;
     if (hc_ble_ready() && !hc_ble_scanning()) hc_ble_scan(0);   /* continuous */
     s_tool_timer = lv_timer_create(radar_tick, 80, NULL);
+}
+
+/* ---- logbook: persistent, de-duplicated record of every AP / BLE device ---- */
+
+static void log_tab_style(lv_obj_t *btn, bool active)
+{
+    lv_obj_set_style_bg_color(btn, lv_color_hex(active ? HC_STRIPE : HC_PANEL), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(active ? HC_HONEY : HC_DIMTXT), 0);
+}
+
+static void log_populate(void)
+{
+    if (!s_log_list) return;
+    lv_obj_clean(s_log_list);
+
+    static hc_scanlog_entry_t rows[128];
+    int n = s_log_show_ble ? hc_scanlog_get_ble(rows, 128)
+                           : hc_scanlog_get_wifi(rows, 128);
+
+    if (s_log_count) {
+        char c[48];
+        snprintf(c, sizeof(c), "%d %s logged", n, s_log_show_ble ? "devices" : "networks");
+        lv_label_set_text(s_log_count, c);
+    }
+
+    if (n == 0) {
+        lv_obj_t *e = lv_label_create(s_log_list);
+        lv_label_set_text(e, s_log_show_ble ? "no BLE devices seen yet\nopen the BLE or radar node to scan"
+                                            : "no networks seen yet\nopen the explorer node to scan");
+        lv_obj_set_style_text_color(e, lv_color_hex(HC_DIMTXT), 0);
+        return;
+    }
+
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *row = lv_obj_create(s_log_list);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), 52);
+        lv_obj_set_style_bg_color(row, lv_color_hex(HC_PANEL), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_radius(row, 6, 0);
+        lv_obj_set_style_pad_left(row, 8, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        /* line 1: label (ssid / name / vendor) */
+        const char *who = rows[i].label[0] ? rows[i].label : NULL;
+        if (!who && s_log_show_ble) {
+            const char *v = hc_ble_vendor(rows[i].company);
+            who = v[0] ? v : "(unknown)";
+        }
+        if (!who) who = "(hidden)";
+        lv_obj_t *l1 = lv_label_create(row);
+        lv_label_set_text(l1, who);
+        lv_obj_set_style_text_color(l1, lv_color_hex(HC_LHONEY), 0);
+        lv_obj_align(l1, LV_ALIGN_TOP_LEFT, 0, 4);
+
+        /* line 2: mac · best rssi · times seen */
+        char l2s[96];
+        snprintf(l2s, sizeof(l2s),
+                 "%02X:%02X:%02X:%02X:%02X:%02X  ·  %ddBm  ·  x%lu",
+                 rows[i].mac[0], rows[i].mac[1], rows[i].mac[2],
+                 rows[i].mac[3], rows[i].mac[4], rows[i].mac[5],
+                 rows[i].rssi_best, (unsigned long)rows[i].count);
+        lv_obj_t *l2 = lv_label_create(row);
+        lv_label_set_text(l2, l2s);
+        lv_obj_set_style_text_color(l2, lv_color_hex(HC_DIMTXT), 0);
+        lv_obj_align(l2, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+    }
+}
+
+static void log_tab_wifi_cb(lv_event_t *e)
+{
+    (void)e;
+    s_log_show_ble = false;
+    log_tab_style(s_log_tab_wifi, true);
+    log_tab_style(s_log_tab_ble, false);
+    log_populate();
+}
+
+static void log_tab_ble_cb(lv_event_t *e)
+{
+    (void)e;
+    s_log_show_ble = true;
+    log_tab_style(s_log_tab_wifi, false);
+    log_tab_style(s_log_tab_ble, true);
+    log_populate();
+}
+
+static lv_obj_t *log_tab(lv_obj_t *parent, const char *txt, int x, lv_event_cb_t cb)
+{
+    lv_obj_t *b = lv_button_create(parent);
+    lv_obj_set_size(b, 150, 44);
+    lv_obj_align(b, LV_ALIGN_TOP_LEFT, x, 70);
+    lv_obj_set_style_border_width(b, 1, 0);
+    lv_obj_set_style_radius(b, 8, 0);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, txt);
+    lv_obj_set_style_text_color(l, lv_color_hex(HC_HONEY), 0);
+    lv_obj_center(l);
+    return b;
+}
+
+static void open_logbook(void)
+{
+    lv_obj_t *ov = tool_shell("logbook");
+
+    s_log_count = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_log_count, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_log_count, LV_ALIGN_TOP_RIGHT, -20, 28);
+
+    s_log_tab_wifi = log_tab(ov, LV_SYMBOL_WIFI "  wifi", 160, log_tab_wifi_cb);
+    s_log_tab_ble  = log_tab(ov, LV_SYMBOL_BLUETOOTH "  ble", 320, log_tab_ble_cb);
+
+    s_log_list = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_log_list);
+    lv_obj_set_size(s_log_list, LV_PCT(92), 480);
+    lv_obj_align(s_log_list, LV_ALIGN_TOP_MID, 0, 128);
+    lv_obj_set_flex_flow(s_log_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_log_list, 6, 0);
+    lv_obj_set_scroll_dir(s_log_list, LV_DIR_VER);
+
+    if (!hc_storage_is_mounted()) {
+        /* logbook still works from RAM, but note SD export is unavailable */
+        lv_obj_t *w = lv_label_create(ov);
+        lv_label_set_text(w, "SD not mounted — CSV export unavailable");
+        lv_obj_set_style_text_color(w, lv_color_hex(HC_RED), 0);
+        lv_obj_align(w, LV_ALIGN_BOTTOM_MID, 0, -14);
+    }
+
+    s_log_show_ble = false;
+    log_tab_style(s_log_tab_wifi, true);
+    log_tab_style(s_log_tab_ble, false);
+    log_populate();
 }
 
 static void async_open_tool(void *p)
@@ -1861,6 +2011,7 @@ static void async_open_tool(void *p)
         case TOOL_EXPLORER: open_explorer(); break;
         case TOOL_BLE:      open_ble(); break;
         case TOOL_RADAR:    open_radar(); break;
+        case TOOL_LOGS:     open_logbook(); break;
         default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
 }
@@ -1979,15 +2130,11 @@ esp_err_t hc_ui_init(void *lv_display)
     lv_obj_set_style_text_color(sub, lv_color_hex(HC_CYAN), 0);
     lv_obj_align(sub, LV_ALIGN_LEFT_MID, 44, 11);
 
-    lv_obj_t *frames_chip = status_chip(hdr, "FRAMES", "0", HC_CYAN);
-    lv_obj_align(lv_obj_get_parent(frames_chip), LV_ALIGN_RIGHT_MID, 0, 0);
-    s_frames_lbl = frames_chip;
-
     /* Radio status dots — reflect the live state of each radio (green=on, red=off). */
     s_ble_dot = radio_dot(hdr, "BLE");
-    lv_obj_align(lv_obj_get_parent(s_ble_dot), LV_ALIGN_RIGHT_MID, -100, 0);
+    lv_obj_align(lv_obj_get_parent(s_ble_dot), LV_ALIGN_RIGHT_MID, 0, 0);
     s_wifi_dot = radio_dot(hdr, "WIFI");
-    lv_obj_align(lv_obj_get_parent(s_wifi_dot), LV_ALIGN_RIGHT_MID, -194, 0);
+    lv_obj_align(lv_obj_get_parent(s_wifi_dot), LV_ALIGN_RIGHT_MID, -94, 0);
 
     bsp_display_unlock();
     s_active = true;
@@ -1998,18 +2145,9 @@ esp_err_t hc_ui_init(void *lv_display)
 
 void hc_ui_add_frame(const hc_dissected_t *row)
 {
-#if HAVE_LVGL
-    if (!s_active || !row) return;
-    s_frame_count++;
-    if (bsp_display_lock(50)) {
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%lu", (unsigned long)s_frame_count);
-        lv_label_set_text(s_frames_lbl, buf);
-        bsp_display_unlock();
-    }
-#else
+    /* Frame counter chip was removed from the header; keep the entry point so
+     * the explorer dissector callback still links. */
     (void)row;
-#endif
 }
 
 void hc_ui_set_energy(const hc_energy_result_t *e) { (void)e; }

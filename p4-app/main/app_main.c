@@ -21,6 +21,7 @@
 
 #include "hc_board.h"
 #include "hc_storage.h"
+#include "hc_scanlog.h"
 #include "hc_explorer.h"
 #include "hc_mode_manager.h"
 #include "hc_flasher.h"
@@ -121,6 +122,7 @@ void app_main(void)
     bool ble_up = c6_up ? hc_ble_start() : false;  /* BLE needs the C6 link up first */
 
     hc_storage_mount();                      /* SD on slot 0; non-fatal if absent */
+    hc_scanlog_init();                       /* scan logbook (CSV on SD) */
 
     hc_ui_init(hc_board_lvgl_display());     /* bound to the BSP display */
     hc_ui_set_radio(c6_up, ble_up);          /* header dots reflect the live radios */
