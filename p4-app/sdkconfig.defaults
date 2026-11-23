@@ -72,3 +72,15 @@ CONFIG_ESP32P4_TAB5_C6_BOARD=y
 # the C6 is powered and before the SD mounts — app_main calls esp_hosted_init()
 # and esp_hosted_connect_to_slave() itself, in the right order.
 CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
+
+# --- BLE via the C6 over ESP-Hosted (HCI over SDIO) ---
+# The NimBLE host stack runs on the P4; the BT controller lives on the C6 and is
+# reached over the same SDIO link (HCI forwarded by ESP-Hosted). Needs the
+# BLE-capable 3.1.0 C6 slave (flashed by the C6 OTA). Local controller disabled.
+CONFIG_ESP_HOSTED_HOST_FEAT_BT=y
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_DISABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_TRANSPORT_UART=n
+CONFIG_BT_NIMBLE_42_FEATURE_SUPPORT=y
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n

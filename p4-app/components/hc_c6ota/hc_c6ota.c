@@ -103,8 +103,11 @@ void hc_c6ota_activate_and_restart(void)
 {
     esp_err_t r = esp_hosted_slave_ota_activate();
     ESP_LOGW(TAG, "activate: %s — restarting P4 to resync with C6", esp_err_to_name(r));
-    /* Outlast the coprocessor's activate-restart + boot window before the P4
-     * resets, or the slave's pending-verify rollback reverts the update. */
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    /* The activate response has already been received (r above), so restart the
+     * P4 promptly — before the C6 reboots and drops the SDIO link. Waiting here
+     * lets the host's SDIO transport hit TRANSPORT_FAILURE and abort() as the
+     * link dies; a quick restart beats that window and reboots cleanly onto the
+     * freshly-activated slave (the P4 resets the C6 via GPIO15 on boot anyway). */
+    vTaskDelay(pdMS_TO_TICKS(300));
     esp_restart();
 }

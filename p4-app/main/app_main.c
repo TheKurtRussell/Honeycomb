@@ -18,6 +18,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+/* BLE via the C6 (NimBLE host on the P4, controller on the C6 over SDIO). */
+#include "esp_hosted_bt_host_stack.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/ble_gap.h"
+#include "host/util/util.h"
+
 #include "hc_board.h"
 #include "hc_storage.h"
 #include "hc_explorer.h"
@@ -101,6 +109,56 @@ static void c6fw_report(void)
              magic == 0xE9 ? "valid app image" : "EMPTY/invalid");
 }
 
+/* --- BLE (NimBLE observer) over the C6, Stage 3a: one boot scan to serial --- */
+
+static int ble_gap_event(struct ble_gap_event *event, void *arg)
+{
+    if (event->type != BLE_GAP_EVENT_DISC) return 0;
+    struct ble_gap_disc_desc *d = &event->disc;
+    char name[32] = "";
+    struct ble_hs_adv_fields f;
+    if (ble_hs_adv_parse_fields(&f, d->data, d->length_data) == 0 && f.name_len) {
+        int n = f.name_len < 31 ? f.name_len : 31;
+        memcpy(name, f.name, n);
+        name[n] = 0;
+    }
+    ESP_LOGI(TAG, "BLE %3d dBm  %02x:%02x:%02x:%02x:%02x:%02x  %s",
+             d->rssi, d->addr.val[5], d->addr.val[4], d->addr.val[3],
+             d->addr.val[2], d->addr.val[1], d->addr.val[0], name);
+    return 0;
+}
+
+static void ble_on_sync(void)
+{
+    uint8_t own = 0;
+    ble_hs_util_ensure_addr(0);
+    if (ble_hs_id_infer_auto(0, &own) != 0) return;
+    struct ble_gap_disc_params p = { .passive = 1, .filter_duplicates = 1 };
+    ESP_LOGI(TAG, "BLE up over C6 — scanning 8s...");
+    ble_gap_disc(own, 8000, &p, ble_gap_event, NULL);   /* 8s observer scan */
+}
+
+static void ble_host_task(void *param)
+{
+    nimble_port_run();                 /* returns only on nimble_port_stop() */
+    nimble_port_freertos_deinit();
+}
+
+/* Bring up the NimBLE host bound to the C6's controller over ESP-Hosted HCI.
+ * Returns true if the stack started (scan runs from ble_on_sync). */
+static bool ble_bringup(void)
+{
+    esp_hosted_bt_host_stack_cfg_t bt = ESP_HOSTED_BT_HOST_STACK_CONFIG_DEFAULT();
+    if (esp_hosted_bt_host_stack_setup(&bt) != ESP_OK) {
+        ESP_LOGW(TAG, "BLE: host stack setup failed (needs the 3.1.0 C6 slave)");
+        return false;
+    }
+    if (nimble_port_init() != ESP_OK) { ESP_LOGE(TAG, "BLE: nimble_port_init failed"); return false; }
+    ble_hs_cfg.sync_cb = ble_on_sync;
+    nimble_port_freertos_init(ble_host_task);
+    return true;
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Honeycomb P4 app 0.1.0");
@@ -116,11 +174,12 @@ void app_main(void)
     hc_board_c6_power(true);
     vTaskDelay(pdMS_TO_TICKS(100));          /* let the C6 boot before we probe it */
     bool c6_up = c6_wifi_bringup();          /* non-fatal if the C6 doesn't answer */
+    bool ble_up = c6_up ? ble_bringup() : false;  /* BLE needs the C6 link up first */
 
     hc_storage_mount();                      /* SD on slot 0; non-fatal if absent */
 
     hc_ui_init(hc_board_lvgl_display());     /* bound to the BSP display */
-    hc_ui_set_radio(c6_up, false);           /* WiFi on if C6 up; BLE off (factory slave) */
+    hc_ui_set_radio(c6_up, ble_up);          /* header dots reflect the live radios */
 
     hc_explorer_callbacks_t ecb = { .on_row = on_row, .on_energy = on_energy,
                                     .on_scan = on_scan };
