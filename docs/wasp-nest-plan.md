@@ -111,6 +111,9 @@ rather than hardening the owner's own network.
 - **Recon:** WiFi explorer, BLE observer, radar, foxhunt. ✅
 - **Logbook:** persistent, de-duplicated WiFi/BLE record on SD. ✅
 - **Counter-surveillance:** item-tracker (AirTag/Tile/SmartTag) detection. ✅
+- **Ring a tracker:** connect + DULT standard non-owner "play sound" on modern
+  AirTags / Find My trackers in separated mode (foxhunt → ring tracker). ✅
+  (Tile/Samsung use authenticated protocols — not supported yet.)
 - **Traffic/telemetry:** link quality + advert-rate meter. ✅
 - **LAN mesh discovery** between the owner's own units. ✅
 - **Still offerable, same spirit (not yet built):** read-only **GATT explorer**
