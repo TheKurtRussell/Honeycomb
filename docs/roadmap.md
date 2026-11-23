@@ -118,3 +118,23 @@ Two problems to solve before re-enabling:
    before probe. This is the anticipated Phase-2 trigger: reflash the C6 over
    SDIO (shadowlab tab5-p4-c6-sdio-ota, no downloader kit) with a matching —
    eventually sniff-capable — slave.
+
+## UPDATE: Wi-Fi WORKING (build cb5e92c)
+
+C6 Wi-Fi scanning works end-to-end. Root cause of the earlier failures was the
+C6 power rail, not a version mismatch: `bsp_feature_enable(BSP_FEATURE_WIFI)`
+(wifi_power on the 0x44 expander) + deferring ESP-Hosted init to app_main
+(ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n) + SD pinned to slot 0 / C6 slot 1.
+Boot log: `Card init success` -> `slave chip id 0x0d (esp32c6)` -> `scan: 8 APs`
+-> `SD mounted (slot 0)`. No boot loop; SD coexists.
+
+### Next: BLE + sniffing need the C6 slave updated
+The factory C6 slave advertises only `WLAN over SDIO` (capabilities=0x01). The
+log also shows a version split: host esp_hosted=3.1.0, coprocessor=2.12.13 ->
+`major version mismatch — OTA coprocessor from host`. So:
+- BLE (HCI over SDIO) is NOT exposed by the 2.12.13 factory slave; a matching
+  3.x slave advertises `HCI over SDIO / BLE` too.
+- ESP-Hosted supports **host-driven OTA of the coprocessor over the same SDIO
+  link** (no downloader kit, no soldering) — this is the Phase-2 C6 reflash
+  path, now clearly in reach. Flash a 3.1.0-matched C6 slave, then BLE comes
+  with the stack and 802.15.4/sniffing is the custom-slave extension on top.
