@@ -20,6 +20,18 @@
 
 static lv_display_t *s_lv_disp;
 
+esp_err_t hc_board_c6_power(bool on)
+{
+    /* The C6 radio's power rail is "wifi_power" on the Tab5's second IO expander
+     * (PI4IOE5V6408 @ 0x44, pin 0). The BSP owns that expander, so route through
+     * its feature API rather than poking I2C directly. Without this the C6 has no
+     * power and never answers on SDIO (send_op_cond times out -> 0x107). */
+    esp_err_t e = bsp_feature_enable(BSP_FEATURE_WIFI, on);
+    ESP_LOGI(TAG, "C6 power %s (%s)", on ? "on" : "off",
+             e == ESP_OK ? "ok" : esp_err_to_name(e));
+    return e;
+}
+
 void hc_board_c6_reset(void)
 {
     gpio_config_t io = {

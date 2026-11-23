@@ -10,6 +10,7 @@
 #define HC_BOARD_H
 
 #include "esp_err.h"
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,10 @@ esp_err_t hc_board_init(void);
 /* The LVGL display created by the BSP, as void* (so non-UI code needn't pull in
  * LVGL types). NULL if the display didn't come up. hc_ui_init() takes this. */
 void *hc_board_lvgl_display(void);
+
+/* Power the C6 radio rail (wifi_power on the 0x44 IO expander). Must be on
+ * before ESP-Hosted probes the C6 over SDIO, or the C6 never answers. */
+esp_err_t hc_board_c6_power(bool on);
 
 /* Pulse the C6 reset line (used by the mode manager). */
 void hc_board_c6_reset(void);

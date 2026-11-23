@@ -25,12 +25,12 @@ dependencies:
   # display power rail, and LVGL (via esp_lvgl_port). Gives us bsp_display_start().
   espressif/m5stack_tab5: "^1.3.0"
 
-  # Wi-Fi/BLE via the C6 over ESP-Hosted (SDIO) is TEMPORARILY REMOVED. The
-  # transport came up with the right Tab5 pins, but ESP-Hosted claims the P4's
-  # SDMMC controller (shared with the microSD on this board), so the SD then
-  # fails to mount and asserts -> boot loop. Re-add espressif/esp_wifi_remote
-  # only once C6/SD SDMMC coexistence is handled (see docs/roadmap.md).
-  #   espressif/esp_wifi_remote: "*"
+  # Wi-Fi/BLE via the C6 over ESP-Hosted (SDIO). esp_wifi_remote forwards the
+  # P4's esp_wifi calls onto the C6 slave; it pulls esp_hosted, which carries
+  # them over SDIO slot 1 (the microSD is on slot 0 — see hc_storage). The Tab5
+  # board profile + ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n are set in
+  # sdkconfig.defaults so app_main controls the C6-power/SDIO/SD ordering.
+  espressif/esp_wifi_remote: "*"
 
   # Pin esp_lvgl_port to 2.8.0. 2.9.0 switched the DPI panel event callback from
   # on_refresh_done to on_frame_buf_complete, which only exists in esp_lcd newer

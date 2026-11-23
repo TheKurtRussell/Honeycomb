@@ -10,6 +10,12 @@
  */
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "esp_hosted.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "hc_board.h"
 #include "hc_storage.h"
@@ -26,11 +32,53 @@ static void on_row(const hc_dissected_t *row, void *ctx)    { hc_ui_add_frame(ro
 static void on_energy(const hc_energy_result_t *e, void *c) { hc_ui_set_energy(e); }
 static void on_scan(const hc_scan_result_t *s, void *c)     { hc_ui_add_scan(s); }
 
-/* mode manager -> UI */
+/* mode manager -> UI (kept for the Phase-2 C6 sniffer control path) */
+__attribute__((unused))
 static void on_mode(hc_radio_mode_t m, bool ok, uint8_t reason, void *c)
 {
     ESP_LOGI(TAG, "mode -> %d ok=%d", m, ok);
     hc_ui_set_mode(m, ok);
+}
+
+/* Bring the C6 radio up over ESP-Hosted (SDIO slot 1) and do one Wi-Fi scan as
+ * proof of life. Safe to fail: on any error we log and return, and the rest of
+ * the app (bench, SD, UI) runs fine without the radio. Must be called AFTER the
+ * C6 is powered and BEFORE the SD mounts (SD is slot 0 of the same controller;
+ * ESP-Hosted claims slot 1 here). */
+static void c6_wifi_bringup(void)
+{
+    int r = esp_hosted_init();
+    if (r == 0) r = esp_hosted_connect_to_slave();
+    if (r != 0) {
+        ESP_LOGW(TAG, "C6 link not up (esp_hosted rc=%d) — continuing without Wi-Fi", r);
+        return;
+    }
+
+    esp_hosted_app_desc_t desc = { 0 };
+    if (esp_hosted_get_coprocessor_app_desc(&desc) == ESP_OK)
+        ESP_LOGW(TAG, "C6 slave: %s  ver=%s  idf=%s", desc.project_name, desc.version, desc.idf_ver);
+
+    if (esp_netif_init() != ESP_OK) return;
+    if (esp_event_loop_create_default() != ESP_OK) return;
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
+    if (esp_wifi_init(&wcfg) != ESP_OK) { ESP_LOGE(TAG, "esp_wifi_init failed"); return; }
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
+
+    ESP_LOGI(TAG, "C6 Wi-Fi up over SDIO — scanning...");
+    if (esp_wifi_scan_start(NULL, true) == ESP_OK) {
+        uint16_t n = 0;
+        esp_wifi_scan_get_ap_num(&n);
+        ESP_LOGI(TAG, "scan: %u APs", n);
+        uint16_t got = n < 20 ? n : 20;
+        static wifi_ap_record_t recs[20];
+        if (got && esp_wifi_scan_get_ap_records(&got, recs) == ESP_OK)
+            for (int i = 0; i < got; i++)
+                ESP_LOGI(TAG, "  %3d dBm  ch%-2d  %s",
+                         recs[i].rssi, recs[i].primary, (char *)recs[i].ssid);
+    }
 }
 
 /* flasher -> UI */
@@ -42,7 +90,16 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
 
     ESP_ERROR_CHECK(hc_board_init());        /* display BSP (headless until bound) */
-    hc_storage_mount();                      /* SD; non-fatal if absent */
+
+    /* C6 radio over ESP-Hosted, then SD. The C6 (SDIO slot 1) and the microSD
+     * (slot 0) share the P4's one SDMMC controller, so order matters: power the
+     * C6, bring ESP-Hosted up on slot 1, THEN mount the SD on slot 0. ESP-Hosted
+     * auto-init is disabled (sdkconfig) so this ordering is ours to control. */
+    hc_board_c6_power(true);
+    vTaskDelay(pdMS_TO_TICKS(100));          /* let the C6 boot before we probe it */
+    c6_wifi_bringup();                       /* non-fatal if the C6 doesn't answer */
+
+    hc_storage_mount();                      /* SD on slot 0; non-fatal if absent */
 
     hc_ui_init(hc_board_lvgl_display());     /* bound to the BSP display */
 
@@ -53,18 +110,6 @@ void app_main(void)
     hc_flasher_init(on_flash, NULL);
     /* hc_flasher_start() is invoked from the Bench tab when a target is plugged
      * in; starting the USB host unconditionally at boot is optional. */
-
-    /* NOTE: ESP-Hosted WiFi (C6 over SDIO) is temporarily reverted. It brought
-     * the SDIO transport up with the right Tab5 pins, but ESP-Hosted claims the
-     * P4's SDMMC controller (shared with the microSD on this board), which then
-     * makes the SD mount fail and assert -> boot loop. Re-enable only once the
-     * C6/SD SDMMC coexistence is handled. For now the C6 stays offline; the P4
-     * flasher / serial bench / file browser / UI all run without it. */
-    esp_err_t e = hc_mode_manager_start(on_mode, NULL);
-    if (e != ESP_OK) {
-        ESP_LOGW(TAG, "C6 link not up (%s)", esp_err_to_name(e));
-        ESP_LOGW(TAG, "continuing without C6 — flash it via the M5 downloader (Plan B)");
-    }
 
     ESP_LOGI(TAG, "ready");
 }
