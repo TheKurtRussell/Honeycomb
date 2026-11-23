@@ -221,6 +221,9 @@ static const uint8_t DULT_SOUND_START[2] = { 0x00, 0x03 };
 static volatile uint8_t s_ring_state = HC_RING_IDLE;
 static uint16_t         s_ring_conn = BLE_HS_CONN_HANDLE_NONE;
 static bool             s_ring_svc_found;   /* sound service located this attempt */
+static char             s_ring_msg[48];     /* diagnostic detail for the UI */
+
+const char *hc_ble_ring_msg(void) { return s_ring_msg; }
 
 static void ring_finish(uint8_t state)
 {
@@ -235,8 +238,10 @@ static int ring_write_cb(uint16_t conn, const struct ble_gatt_error *err,
                          struct ble_gatt_attr *attr, void *arg)
 {
     (void)conn; (void)attr; (void)arg;
-    ESP_LOGI(TAG, "ring write status=%d", err ? err->status : -1);
-    ring_finish((err && err->status == 0) ? HC_RING_OK : HC_RING_FAIL);
+    int st = err ? err->status : -1;
+    ESP_LOGI(TAG, "ring write status=%d", st);
+    if (st == 0) { snprintf(s_ring_msg, sizeof(s_ring_msg), "sound command accepted"); ring_finish(HC_RING_OK); }
+    else         { snprintf(s_ring_msg, sizeof(s_ring_msg), "write rejected (att 0x%02x)", st & 0xff); ring_finish(HC_RING_FAIL); }
     return 0;
 }
 
@@ -245,6 +250,7 @@ static int ring_chr_cb(uint16_t conn, const struct ble_gatt_error *err,
 {
     (void)arg;
     if (err && err->status != 0 && err->status != BLE_HS_EDONE) {
+        snprintf(s_ring_msg, sizeof(s_ring_msg), "chr disc err %d", err->status);
         ring_finish(HC_RING_FAIL);
         return 0;
     }
@@ -252,11 +258,14 @@ static int ring_chr_cb(uint16_t conn, const struct ble_gatt_error *err,
         s_ring_state = HC_RING_WRITING;
         if (ble_gattc_write_flat(conn, chr->val_handle,
                                  DULT_SOUND_START, sizeof(DULT_SOUND_START),
-                                 ring_write_cb, NULL) != 0)
+                                 ring_write_cb, NULL) != 0) {
+            snprintf(s_ring_msg, sizeof(s_ring_msg), "write call failed");
             ring_finish(HC_RING_FAIL);
+        }
     }
     /* EDONE with no matching characteristic -> failure */
     else if (err && err->status == BLE_HS_EDONE && s_ring_state == HC_RING_DISCOVERING) {
+        snprintf(s_ring_msg, sizeof(s_ring_msg), "sound svc has no control chr");
         ring_finish(HC_RING_FAIL);
     }
     return 0;
@@ -267,6 +276,7 @@ static int ring_svc_cb(uint16_t conn, const struct ble_gatt_error *err,
 {
     (void)arg;
     if (err && err->status != 0 && err->status != BLE_HS_EDONE) {
+        snprintf(s_ring_msg, sizeof(s_ring_msg), "svc disc err %d", err->status);
         ring_finish(HC_RING_FAIL);
         return 0;
     }
@@ -274,10 +284,13 @@ static int ring_svc_cb(uint16_t conn, const struct ble_gatt_error *err,
         /* found the sound service — look for its control characteristic */
         s_ring_svc_found = true;
         if (ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle,
-                                        &DULT_CHR.u, ring_chr_cb, NULL) != 0)
+                                        &DULT_CHR.u, ring_chr_cb, NULL) != 0) {
+            snprintf(s_ring_msg, sizeof(s_ring_msg), "chr disc call failed");
             ring_finish(HC_RING_FAIL);
+        }
     } else if (err && err->status == BLE_HS_EDONE && !s_ring_svc_found) {
         /* discovery finished and no DULT sound service was present */
+        snprintf(s_ring_msg, sizeof(s_ring_msg), "no DULT sound svc (needs separated)");
         ring_finish(HC_RING_FAIL);
     }
     return 0;
@@ -296,6 +309,7 @@ static int ring_gap_cb(struct ble_gap_event *e, void *arg)
                 ring_finish(HC_RING_FAIL);
         } else {
             s_ring_conn = BLE_HS_CONN_HANDLE_NONE;
+            snprintf(s_ring_msg, sizeof(s_ring_msg), "connect failed (%d)", e->connect.status);
             s_ring_state = HC_RING_FAIL;
         }
         break;
@@ -327,9 +341,12 @@ bool hc_ble_ring(const uint8_t addr[6], uint8_t addr_type)
 
     s_ring_conn      = BLE_HS_CONN_HANDLE_NONE;
     s_ring_svc_found = false;
+    s_ring_msg[0]    = 0;
     s_ring_state     = HC_RING_CONNECTING;
     /* 8s connect timeout; default connection params. */
-    if (ble_gap_connect(own, &peer, 8000, NULL, ring_gap_cb, NULL) != 0) {
+    int rc = ble_gap_connect(own, &peer, 8000, NULL, ring_gap_cb, NULL);
+    if (rc != 0) {
+        snprintf(s_ring_msg, sizeof(s_ring_msg), "connect call err %d", rc);
         s_ring_state = HC_RING_FAIL;
         return false;
     }

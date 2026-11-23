@@ -1471,10 +1471,37 @@ static void open_explorer(void)
 /* ---- ble: live BLE device scan via the C6 ---- */
 
 /* Timer on the LVGL thread: refresh the device list from hc_ble_get(). */
+/* Foxhunt can be opened from the radar or the BLE list. */
+static void foxhunt_open(const uint8_t *addr, uint8_t addr_type, uint8_t tracker,
+                         uint16_t company, const char *name);
+static void fox_update(void);
+
+/* Snapshot behind the BLE list rows, so a tapped row maps to its device. */
+static hc_ble_dev_t s_ble_view[24];
+static int          s_ble_view_n;
+
+static void ble_row_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (i < 0 || i >= s_ble_view_n) return;
+    foxhunt_open(s_ble_view[i].addr, s_ble_view[i].addr_type,
+                 s_ble_view[i].tracker, s_ble_view[i].company_id,
+                 s_ble_view[i].name);
+}
+
 static void ble_refresh(lv_timer_t *t)
 {
     (void)t;
-    if (!s_ble_list) return;
+    if (!s_ble_list) { return; }
+
+    /* While foxhunting from the BLE list: keep scanning for live proximity
+     * (and resume after a ring releases the radio), update the panel, done. */
+    if (s_fox_panel) {
+        if (hc_ble_ready() && !hc_ble_scanning() && !hc_ble_ring_busy())
+            hc_ble_scan(0);
+        fox_update();
+        return;
+    }
 
     static hc_ble_dev_t devs[48];
     int n = hc_ble_get(devs, 48);
@@ -1492,6 +1519,10 @@ static void ble_refresh(lv_timer_t *t)
     }
     s_ble_last_n = n;
 
+    /* Snapshot behind the rows so a tap maps to the device shown. */
+    memcpy(s_ble_view, devs, n * sizeof(hc_ble_dev_t));
+    s_ble_view_n = n;
+
     lv_obj_clean(s_ble_list);
     for (int i = 0; i < n; i++) {
         lv_obj_t *row = lv_obj_create(s_ble_list);
@@ -1501,6 +1532,9 @@ static void ble_refresh(lv_timer_t *t)
         lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
         lv_obj_set_style_radius(row, 6, 0);
         lv_obj_set_style_pad_left(row, 8, 0);
+        /* Tap a row -> foxhunt (with ring for trackers). */
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, ble_row_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         const uint8_t *a = devs[i].addr;
         const char *ven = hc_ble_vendor(devs[i].company_id);
@@ -1637,9 +1671,10 @@ static float blip_radius(int rssi)
 static void fox_update(void)
 {
     if (!s_fox_panel) return;
-    int rssi = -127, found = 0;
-    for (int i = 0; i < s_radar_n; i++)
-        if (memcmp(s_radar_devs[i].addr, s_fox_addr, 6) == 0) { rssi = s_radar_devs[i].rssi; found = 1; break; }
+    /* Live RSSI from the BLE device table — works whether foxhunt was opened
+     * from the radar or the BLE list. */
+    int rssi = hc_ble_find(s_fox_addr);
+    int found = (rssi > -128);
 
     int close = 0;
     if (found) {
@@ -1676,10 +1711,10 @@ static void fox_update(void)
             case HC_RING_DISCOVERING: msg = "finding sound svc..."; col = HC_LHONEY; break;
             case HC_RING_WRITING:     msg = "sending ring...";      col = HC_LHONEY; break;
             case HC_RING_OK:          msg = "ringing " LV_SYMBOL_BELL; col = HC_GREEN; break;
-            case HC_RING_FAIL:        msg = "no ring (separated-mode only)"; col = HC_RED; break;
+            case HC_RING_FAIL:        msg = hc_ble_ring_msg();       col = HC_RED; break;
             default:                  msg = "";                     col = HC_DIMTXT; break;
         }
-        lv_label_set_text(s_fox_ring_lbl, msg);
+        lv_label_set_text(s_fox_ring_lbl, msg[0] ? msg : "no ring");
         lv_obj_set_style_text_color(s_fox_ring_lbl, lv_color_hex(col), 0);
     }
 }
@@ -1699,18 +1734,18 @@ static void fox_close_cb(lv_event_t *e)
     s_fox_last = -127;
 }
 
-/* Build the foxhunt panel over the radar for the device at radar index idx. */
-static void open_foxhunt(int idx)
+/* Build the foxhunt panel for a specific device (from radar or the BLE list). */
+static void foxhunt_open(const uint8_t *addr, uint8_t addr_type, uint8_t tracker,
+                         uint16_t company, const char *name)
 {
-    if (s_fox_panel || idx < 0 || idx >= s_radar_n) return;
-    memcpy(s_fox_addr, s_radar_devs[idx].addr, 6);
-    s_fox_addr_type = s_radar_devs[idx].addr_type;
-    s_fox_tracker   = s_radar_devs[idx].tracker;
+    if (s_fox_panel || !addr) return;
+    memcpy(s_fox_addr, addr, 6);
+    s_fox_addr_type = addr_type;
+    s_fox_tracker   = tracker;
     s_fox_last = -127;
 
-    const char *ven = hc_ble_vendor(s_radar_devs[idx].company_id);
-    const char *who = s_radar_devs[idx].name[0] ? s_radar_devs[idx].name :
-                      (ven[0] ? ven : "unknown device");
+    const char *ven = hc_ble_vendor(company);
+    const char *who = (name && name[0]) ? name : (ven[0] ? ven : "unknown device");
 
     s_fox_panel = lv_obj_create(s_overlay);
     lv_obj_remove_style_all(s_fox_panel);
@@ -1761,7 +1796,7 @@ static void open_foxhunt(int idx)
     lv_obj_set_style_border_width(done, 1, 0);
     lv_obj_add_event_cb(done, fox_close_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *dl = lv_label_create(done);
-    lv_label_set_text(dl, "back to radar");
+    lv_label_set_text(dl, LV_SYMBOL_LEFT "  back");
     lv_obj_set_style_text_color(dl, lv_color_hex(HC_CYAN), 0);
     lv_obj_center(dl);
 
@@ -1790,7 +1825,10 @@ static void open_foxhunt(int idx)
 static void blip_click_cb(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
-    open_foxhunt(i);
+    if (i < 0 || i >= s_radar_n) return;
+    foxhunt_open(s_radar_devs[i].addr, s_radar_devs[i].addr_type,
+                 s_radar_devs[i].tracker, s_radar_devs[i].company_id,
+                 s_radar_devs[i].name);
 }
 
 static void radar_tick(lv_timer_t *t)

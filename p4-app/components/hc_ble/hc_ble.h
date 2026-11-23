@@ -67,6 +67,8 @@ enum {
 bool    hc_ble_ring(const uint8_t addr[6], uint8_t addr_type);
 uint8_t hc_ble_ring_state(void);
 bool    hc_ble_ring_busy(void);
+/* Diagnostic detail for the last/active ring attempt (stage + error code). */
+const char *hc_ble_ring_msg(void);
 
 /* Bring up the NimBLE host bound to the C6 controller. Returns true if the
  * stack started (the controller syncs asynchronously; see hc_ble_ready). */
