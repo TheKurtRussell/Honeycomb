@@ -74,8 +74,11 @@ static bool s_active;
 #define HDR_H   70
 #define COMB_OX 16
 #define COMB_OY (HDR_H + 12)
-#define COMB_COLS 15
-#define COMB_ROWS 8
+/* Grid sized to roughly the visible screen around the node cluster (cols 6-8,
+ * rows 2-4). Trimmed from 15x8 to cut idle decorative cells — less LVGL heap
+ * held and a faster comb build, with the cluster still auto-centered. */
+#define COMB_COLS 11
+#define COMB_ROWS 6
 /* Focused decorative window around the functional cluster (cols 6-8, rows 2-4). */
 #define COMB_FOCUS_C0 4
 #define COMB_FOCUS_C1 10
@@ -1567,8 +1570,8 @@ static void radar_tick(lv_timer_t *t)
         int sz = s_radar_devs[i].rssi > -55 ? 16 : s_radar_devs[i].rssi > -75 ? 12 : 9;
         lv_obj_set_size(b, sz, sz);
         lv_obj_set_pos(b, x - sz / 2, y - sz / 2);
-        uint32_t col = s_radar_devs[i].rssi > -60 ? HC_HONEY :
-                       s_radar_devs[i].rssi > -80 ? HC_LHONEY : HC_CYAN;
+        uint32_t col = s_radar_devs[i].rssi > -60 ? HC_SCAN :
+                       s_radar_devs[i].rssi > -80 ? HC_GREEN : HC_SCANDIM;
         lv_obj_set_style_bg_color(b, lv_color_hex(col), 0);
         lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
     }
@@ -1595,7 +1598,7 @@ static void open_radar(void)
     lv_obj_t *ov = tool_shell("radar");
 
     s_radar_info = lv_label_create(ov);
-    lv_obj_set_style_text_color(s_radar_info, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_text_color(s_radar_info, lv_color_hex(HC_SCAN), 0);
     lv_obj_align(s_radar_info, LV_ALIGN_TOP_LEFT, 44, 100);
     lv_label_set_text(s_radar_info, hc_ble_ready() ? "scanning..." : "BLE not available");
 
@@ -1613,7 +1616,7 @@ static void open_radar(void)
         lv_obj_set_size(ring, d, d);
         lv_obj_set_pos(ring, RADAR_C - d / 2, RADAR_C - d / 2);
         lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_color(ring, lv_color_hex(0x1C4A4A), 0);
+        lv_obj_set_style_border_color(ring, lv_color_hex(HC_SCANDIM), 0);
         lv_obj_set_style_border_width(ring, 1, 0);
         lv_obj_set_style_border_opa(ring, LV_OPA_COVER, 0);
     }
@@ -1622,13 +1625,13 @@ static void open_radar(void)
     lv_obj_remove_style_all(hbar);
     lv_obj_set_size(hbar, RADAR_R * 2, 1);
     lv_obj_set_pos(hbar, RADAR_C - RADAR_R, RADAR_C);
-    lv_obj_set_style_bg_color(hbar, lv_color_hex(0x1C4A4A), 0);
+    lv_obj_set_style_bg_color(hbar, lv_color_hex(HC_SCANDIM), 0);
     lv_obj_set_style_bg_opa(hbar, LV_OPA_COVER, 0);
     lv_obj_t *vbar = lv_obj_create(s_radar_area);
     lv_obj_remove_style_all(vbar);
     lv_obj_set_size(vbar, 1, RADAR_R * 2);
     lv_obj_set_pos(vbar, RADAR_C, RADAR_C - RADAR_R);
-    lv_obj_set_style_bg_color(vbar, lv_color_hex(0x1C4A4A), 0);
+    lv_obj_set_style_bg_color(vbar, lv_color_hex(HC_SCANDIM), 0);
     lv_obj_set_style_bg_opa(vbar, LV_OPA_COVER, 0);
 
     /* Sweep line. */
@@ -1636,7 +1639,7 @@ static void open_radar(void)
     s_sweep_pts[0].y = s_sweep_pts[1].y = RADAR_C;
     s_radar_sweep = lv_line_create(s_radar_area);
     lv_line_set_points(s_radar_sweep, s_sweep_pts, 2);
-    lv_obj_set_style_line_color(s_radar_sweep, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_line_color(s_radar_sweep, lv_color_hex(HC_SCAN), 0);
     lv_obj_set_style_line_width(s_radar_sweep, 2, 0);
     lv_obj_set_style_line_rounded(s_radar_sweep, true, 0);
 
