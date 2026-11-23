@@ -283,6 +283,11 @@ static volatile bool s_c6ota_running;
 static int        s_c6ota_pct, s_c6ota_last;
 static char       s_c6ota_msg[40];
 static char       s_fb_path[160];
+static lv_obj_t  *s_fv_panel;         /* file viewer panel */
+static lv_obj_t  *s_fv_text;          /* file viewer text label */
+static char       s_fv_path[224];     /* full path of the viewed file */
+static bool       s_fv_delarm;        /* delete button armed (two-tap confirm) */
+static char       s_fv_buf[8192];     /* file head for viewing */
 static char       s_log_buf[2560];
 static size_t     s_log_len;
 static char       s_flash_path[HC_PATH_MAX];
@@ -401,6 +406,8 @@ static void close_tool(lv_event_t *e)
     s_bench_bar = NULL;
     s_baud_row = NULL;
     s_fb_list = s_fb_pathlbl = NULL;
+    s_fv_panel = s_fv_text = NULL;
+    s_fv_delarm = false;
     s_wifi_list = s_wifi_status = NULL;
     s_ble_list = s_ble_status = NULL;
     s_radar_area = s_radar_sweep = s_radar_blips = s_radar_info = NULL;
@@ -993,6 +1000,109 @@ static lv_obj_t *fb_row(const char *text, bool tappable)
     return b;
 }
 
+/* ---- file viewer: peek text/log contents, with a guarded delete ---- */
+
+static void fv_close_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_fv_panel) { lv_obj_delete_async(s_fv_panel); s_fv_panel = NULL; }
+    s_fv_text = NULL;
+}
+
+static void fv_delete_cb(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *lbl = lv_obj_get_child(btn, 0);
+    if (!s_fv_delarm) {                       /* first tap arms, second confirms */
+        s_fv_delarm = true;
+        if (lbl) lv_label_set_text(lbl, "tap again to delete");
+        lv_obj_set_style_bg_color(btn, lv_color_hex(HC_RED), 0);
+        return;
+    }
+    hc_storage_delete(s_fv_path);
+    s_fv_delarm = false;
+    if (s_fv_panel) { lv_obj_delete_async(s_fv_panel); s_fv_panel = NULL; }
+    s_fv_text = NULL;
+    lv_async_call(fb_refresh, NULL);          /* refresh the listing */
+}
+
+static void open_file_viewer(const char *name)
+{
+    if (s_fv_panel || !name) return;
+    snprintf(s_fv_path, sizeof(s_fv_path), "%s/%s", s_fb_path, name);
+    size_t len = 0;
+    hc_storage_read_head(s_fv_path, s_fv_buf, sizeof(s_fv_buf), &len);
+    s_fv_delarm = false;
+
+    s_fv_panel = lv_obj_create(s_overlay);
+    lv_obj_remove_style_all(s_fv_panel);
+    lv_obj_set_size(s_fv_panel, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_fv_panel, lv_color_hex(HC_BG), 0);
+    lv_obj_set_style_bg_opa(s_fv_panel, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_fv_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *path = lv_label_create(s_fv_panel);
+    lv_label_set_long_mode(path, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(path, LV_PCT(90));
+    lv_obj_align(path, LV_ALIGN_TOP_LEFT, 32, 20);
+    lv_obj_set_style_text_color(path, lv_color_hex(HC_CYAN), 0);
+    lv_label_set_text(path, name);
+
+    lv_obj_t *box = lv_obj_create(s_fv_panel);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, LV_PCT(92), 560);
+    lv_obj_align(box, LV_ALIGN_TOP_LEFT, 32, 56);
+    lv_obj_set_style_bg_color(box, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_40, 0);
+    lv_obj_set_style_pad_all(box, 10, 0);
+    lv_obj_set_style_radius(box, 8, 0);
+    lv_obj_set_scroll_dir(box, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_AUTO);
+
+    s_fv_text = lv_label_create(box);
+    lv_label_set_long_mode(s_fv_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_fv_text, LV_PCT(100));
+    lv_obj_set_style_text_color(s_fv_text, lv_color_hex(HC_LHONEY), 0);
+    if (len == 0) lv_label_set_text(s_fv_text, "(empty or unreadable)");
+    else {
+        lv_label_set_text(s_fv_text, s_fv_buf);
+        if (len == sizeof(s_fv_buf) - 1) {
+            lv_obj_t *more = lv_label_create(box);
+            lv_label_set_text(more, "\n--- showing first 8 KB ---");
+            lv_obj_set_style_text_color(more, lv_color_hex(HC_DIMTXT), 0);
+        }
+    }
+
+    lv_obj_t *del = lv_button_create(s_fv_panel);
+    lv_obj_set_size(del, 220, 54);
+    lv_obj_align(del, LV_ALIGN_BOTTOM_LEFT, 32, -18);
+    lv_obj_set_style_bg_color(del, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(del, lv_color_hex(HC_RED), 0);
+    lv_obj_set_style_border_width(del, 1, 0);
+    lv_obj_add_event_cb(del, fv_delete_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *dll = lv_label_create(del);
+    lv_label_set_text(dll, LV_SYMBOL_TRASH "  delete");
+    lv_obj_set_style_text_color(dll, lv_color_hex(HC_RED), 0);
+    lv_obj_center(dll);
+
+    lv_obj_t *cls = lv_button_create(s_fv_panel);
+    lv_obj_set_size(cls, 160, 54);
+    lv_obj_align(cls, LV_ALIGN_BOTTOM_RIGHT, -32, -18);
+    lv_obj_set_style_bg_color(cls, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(cls, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(cls, 1, 0);
+    lv_obj_add_event_cb(cls, fv_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cll = lv_label_create(cls);
+    lv_label_set_text(cll, "close");
+    lv_obj_set_style_text_color(cll, lv_color_hex(HC_CYAN), 0);
+    lv_obj_center(cll);
+}
+
+static void fb_file_cb(lv_event_t *e)
+{
+    open_file_viewer((const char *)lv_event_get_user_data(e));
+}
+
 static void fb_populate(void)
 {
     if (!s_fb_list) return;
@@ -1013,9 +1123,11 @@ static void fb_populate(void)
         else
             snprintf(label, sizeof(label), LV_SYMBOL_FILE "  %s   (%lu B)",
                      s_fb_entries[i].name, (unsigned long)s_fb_entries[i].size);
-        lv_obj_t *row = fb_row(label, s_fb_entries[i].is_dir);
+        lv_obj_t *row = fb_row(label, true);   /* dirs navigate, files open a viewer */
         if (s_fb_entries[i].is_dir)
             lv_obj_add_event_cb(row, fb_dir_cb, LV_EVENT_CLICKED, s_fb_entries[i].name);
+        else
+            lv_obj_add_event_cb(row, fb_file_cb, LV_EVENT_CLICKED, s_fb_entries[i].name);
     }
     if (n == 0) {
         lv_obj_t *empty = lv_label_create(s_fb_list);

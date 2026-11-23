@@ -143,6 +143,27 @@ esp_err_t hc_storage_list_dir(const char *dir, hc_dirent_t *out, int max, int *n
     return ESP_OK;
 }
 
+esp_err_t hc_storage_read_head(const char *path, char *buf, size_t cap, size_t *len)
+{
+    if (len) *len = 0;
+    if (!path || !buf || cap < 1) return ESP_ERR_INVALID_ARG;
+    if (!s_mounted) return ESP_ERR_INVALID_STATE;
+    FILE *f = fopen(path, "rb");
+    if (!f) return ESP_FAIL;
+    size_t got = fread(buf, 1, cap - 1, f);
+    fclose(f);
+    buf[got] = 0;
+    if (len) *len = got;
+    return ESP_OK;
+}
+
+esp_err_t hc_storage_delete(const char *path)
+{
+    if (!path) return ESP_ERR_INVALID_ARG;
+    if (!s_mounted) return ESP_ERR_INVALID_STATE;
+    return (remove(path) == 0) ? ESP_OK : ESP_FAIL;
+}
+
 esp_err_t hc_storage_save_log(const char *text, char *path_out, size_t cap)
 {
     if (!s_mounted) return ESP_ERR_INVALID_STATE;

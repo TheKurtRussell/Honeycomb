@@ -35,6 +35,13 @@ typedef struct {
 } hc_dirent_t;
 esp_err_t hc_storage_list_dir(const char *dir, hc_dirent_t *out, int max, int *n);
 
+/* Read up to cap-1 bytes from the head of a file into buf (NUL-terminated).
+ * For viewing text / log files. Returns bytes read in *len (may be 0). */
+esp_err_t hc_storage_read_head(const char *path, char *buf, size_t cap, size_t *len);
+
+/* Delete a file. */
+esp_err_t hc_storage_delete(const char *path);
+
 /* Save a text blob (e.g. the serial monitor log) to a fresh
  * /sdcard/honeycomb/serial-NNN.txt and return its path in path_out. */
 esp_err_t hc_storage_save_log(const char *text, char *path_out, size_t cap);
