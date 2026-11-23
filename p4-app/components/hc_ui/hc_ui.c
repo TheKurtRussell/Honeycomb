@@ -14,6 +14,7 @@
 #include "hc_ui.h"
 #include "hc_mode_manager.h"
 #include "hc_storage.h"
+#include "hc_c6ota.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -240,6 +241,12 @@ static lv_obj_t  *s_conn_kb;          /* explorer: on-screen keyboard */
 static char       s_sel_ssid[33];     /* AP chosen to connect to */
 static char       s_conn_result[72];  /* connect outcome, applied on LVGL thread */
 static volatile bool s_connecting;
+static lv_obj_t  *s_c6ota_panel;      /* config: C6-update confirm/progress panel */
+static lv_obj_t  *s_c6ota_status;     /* config: C6-update status label */
+static lv_obj_t  *s_c6ota_bar;        /* config: C6-update progress bar */
+static volatile bool s_c6ota_running;
+static int        s_c6ota_pct, s_c6ota_last;
+static char       s_c6ota_msg[40];
 static char       s_fb_path[160];
 static char       s_log_buf[2560];
 static size_t     s_log_len;
@@ -357,6 +364,7 @@ static void close_tool(lv_event_t *e)
     s_fb_list = s_fb_pathlbl = NULL;
     s_wifi_list = s_wifi_status = NULL;
     s_conn_panel = s_conn_pw = s_conn_kb = NULL;
+    s_c6ota_panel = s_c6ota_status = s_c6ota_bar = NULL;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -450,6 +458,129 @@ static void dash_timer_cb(lv_timer_t *t)
     }
 }
 
+/* ---- C6 radio update (host-driven OTA to the BLE-capable slave) ---- */
+
+/* Apply progress to the UI (LVGL thread, via lv_async). */
+static void c6ota_ui_apply(void *p)
+{
+    (void)p;
+    if (s_c6ota_bar)    lv_bar_set_value(s_c6ota_bar, s_c6ota_pct, LV_ANIM_OFF);
+    if (s_c6ota_status) lv_label_set_text(s_c6ota_status, s_c6ota_msg);
+}
+
+/* Progress callback from the OTA worker; throttle UI updates to pct changes. */
+static void c6ota_cb(int pct, const char *msg, void *ctx)
+{
+    (void)ctx;
+    s_c6ota_pct = pct;
+    strlcpy(s_c6ota_msg, msg, sizeof(s_c6ota_msg));
+    if (pct != s_c6ota_last) { s_c6ota_last = pct; lv_async_call(c6ota_ui_apply, NULL); }
+}
+
+static void c6ota_task(void *arg)
+{
+    (void)arg;
+    esp_err_t r = hc_c6ota_from_partition("c6fw", c6ota_cb, NULL);
+    if (r == ESP_OK) {
+        strlcpy(s_c6ota_msg, "activating — C6 reboot", sizeof(s_c6ota_msg));
+        lv_async_call(c6ota_ui_apply, NULL);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        hc_c6ota_activate_and_restart();   /* reboots the P4 — no return */
+    }
+    s_c6ota_pct = 0;
+    strlcpy(s_c6ota_msg, "update failed — C6 unchanged", sizeof(s_c6ota_msg));
+    s_c6ota_running = false;
+    lv_async_call(c6ota_ui_apply, NULL);
+    vTaskDelete(NULL);
+}
+
+/* LVGL thread (async, not inside an event): swap the confirm panel for a
+ * progress view and kick off the OTA worker. */
+static void c6ota_begin(void *p)
+{
+    (void)p;
+    if (s_c6ota_running || !s_c6ota_panel) return;
+    lv_obj_clean(s_c6ota_panel);
+    s_c6ota_status = s_c6ota_bar = NULL;
+
+    lv_obj_t *t = lv_label_create(s_c6ota_panel);
+    lv_label_set_text(t, "Updating C6 radio — do not power off");
+    lv_obj_set_style_text_color(t, lv_color_hex(HC_HONEY), 0);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 6, 6);
+
+    s_c6ota_bar = lv_bar_create(s_c6ota_panel);
+    lv_obj_set_size(s_c6ota_bar, LV_PCT(92), 18);
+    lv_obj_align(s_c6ota_bar, LV_ALIGN_TOP_MID, 0, 44);
+    lv_bar_set_range(s_c6ota_bar, 0, 100);
+    lv_bar_set_value(s_c6ota_bar, 0, LV_ANIM_OFF);
+
+    s_c6ota_status = lv_label_create(s_c6ota_panel);
+    lv_label_set_text(s_c6ota_status, "starting...");
+    lv_obj_set_style_text_color(s_c6ota_status, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_c6ota_status, LV_ALIGN_TOP_MID, 0, 74);
+
+    s_c6ota_last = -1;
+    s_c6ota_running = true;
+    if (xTaskCreate(c6ota_task, "c6ota", 6144, NULL, 4, NULL) != pdPASS) {
+        s_c6ota_running = false;
+        lv_label_set_text(s_c6ota_status, "could not start");
+    }
+}
+
+static void c6ota_go_cb(lv_event_t *e)    { (void)e; lv_async_call(c6ota_begin, NULL); }
+static void c6ota_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_c6ota_panel) { lv_obj_delete_async(s_c6ota_panel); s_c6ota_panel = NULL; }
+    s_c6ota_status = s_c6ota_bar = NULL;
+}
+
+/* "Update C6 radio" button handler -> confirmation panel. */
+static void c6ota_confirm_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_c6ota_panel || s_c6ota_running) return;
+
+    s_c6ota_panel = lv_obj_create(s_overlay);
+    lv_obj_set_size(s_c6ota_panel, 600, 240);
+    lv_obj_align(s_c6ota_panel, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_set_style_bg_color(s_c6ota_panel, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(s_c6ota_panel, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_border_width(s_c6ota_panel, 1, 0);
+    lv_obj_set_style_radius(s_c6ota_panel, 10, 0);
+    lv_obj_remove_flag(s_c6ota_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *w = lv_label_create(s_c6ota_panel);
+    lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(w, LV_PCT(94));
+    lv_label_set_text(w,
+        "Reflash the C6 radio to the BLE-capable firmware?\n"
+        "Takes ~30-60s over SDIO. If it fails, the C6 falls back to the factory "
+        "firmware on its own. The device reboots when done.");
+    lv_obj_set_style_text_color(w, lv_color_hex(HC_LHONEY), 0);
+    lv_obj_align(w, LV_ALIGN_TOP_LEFT, 8, 8);
+
+    lv_obj_t *go = lv_button_create(s_c6ota_panel);
+    lv_obj_set_size(go, 180, 54);
+    lv_obj_align(go, LV_ALIGN_BOTTOM_LEFT, 12, -12);
+    lv_obj_set_style_bg_color(go, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_border_color(go, lv_color_hex(HC_GREEN), 0);
+    lv_obj_set_style_border_width(go, 1, 0);
+    lv_obj_add_event_cb(go, c6ota_go_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *gl = lv_label_create(go); lv_label_set_text(gl, "update C6");
+    lv_obj_set_style_text_color(gl, lv_color_hex(HC_GREEN), 0); lv_obj_center(gl);
+
+    lv_obj_t *cx = lv_button_create(s_c6ota_panel);
+    lv_obj_set_size(cx, 180, 54);
+    lv_obj_align(cx, LV_ALIGN_BOTTOM_RIGHT, -12, -12);
+    lv_obj_set_style_bg_color(cx, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_border_color(cx, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_set_style_border_width(cx, 1, 0);
+    lv_obj_add_event_cb(cx, c6ota_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cl = lv_label_create(cx); lv_label_set_text(cl, "cancel");
+    lv_obj_set_style_text_color(cl, lv_color_hex(HC_DIMTXT), 0); lv_obj_center(cl);
+}
+
 static void open_config(void)
 {
     lv_obj_t *ov = tool_shell("device");
@@ -476,6 +607,19 @@ static void open_config(void)
     s_dash_psram  = dash_row(body, "PSRAM", "...", y); y += dy;
     s_dash_heap   = dash_row(body, "HEAP", "...", y); y += dy;
     s_dash_uptime = dash_row(body, "UPTIME", "...", y); y += dy;
+
+    /* Update the on-board C6 radio to the BLE-capable slave (host-driven OTA). */
+    lv_obj_t *ota = lv_button_create(ov);
+    lv_obj_set_size(ota, 300, 60);
+    lv_obj_align(ota, LV_ALIGN_BOTTOM_LEFT, 44, -40);
+    lv_obj_set_style_bg_color(ota, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(ota, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_border_width(ota, 1, 0);
+    lv_obj_add_event_cb(ota, c6ota_confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ol = lv_label_create(ota);
+    lv_label_set_text(ol, LV_SYMBOL_REFRESH "  Update C6 radio (BLE)");
+    lv_obj_set_style_text_color(ol, lv_color_hex(HC_HONEY), 0);
+    lv_obj_center(ol);
 
     dash_timer_cb(NULL);
     s_tool_timer = lv_timer_create(dash_timer_cb, 1000, NULL);
