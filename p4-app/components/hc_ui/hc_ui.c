@@ -2163,6 +2163,13 @@ static void tile_click_cb(lv_event_t *e)
 /* Themed boot splash, shown the moment the display is up so the radio bring-up
  * (a few seconds) reads as "initializing" instead of a blank white panel.
  * hc_ui_init() replaces and deletes it. */
+#if HAVE_LVGL
+/* Anim exec wrappers: the real setters take a 3rd arg, so they can't be cast
+ * straight to the 2-arg anim callback type. */
+static void splash_bar_cb(void *obj, int32_t v) { lv_bar_set_value((lv_obj_t *)obj, v, LV_ANIM_OFF); }
+static void splash_opa_cb(void *obj, int32_t v) { lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)v, 0); }
+#endif
+
 void hc_ui_splash(void *lv_display)
 {
     if (!lv_display) return;
@@ -2215,6 +2222,39 @@ void hc_ui_splash(void *lv_display)
     lv_label_set_text(boot, "initializing radios...");
     lv_obj_set_style_text_color(boot, lv_color_hex(HC_DIMTXT), 0);
     lv_obj_align(boot, LV_ALIGN_CENTER, 0, 150);
+
+    /* Indeterminate "loading" bar — animates on the LVGL port task while
+     * app_main blocks on the C6/WiFi/BLE bring-up, so boot never looks frozen. */
+    lv_obj_t *bar = lv_bar_create(s_splash_scr);
+    lv_obj_set_size(bar, 300, 8);
+    lv_obj_align(bar, LV_ALIGN_CENTER, 0, 186);
+    lv_obj_set_style_radius(bar, 4, 0);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(HC_STRIPE), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(HC_HONEY), LV_PART_INDICATOR);
+    lv_bar_set_range(bar, 0, 100);
+
+    static lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, bar);
+    lv_anim_set_exec_cb(&a, splash_bar_cb);
+    lv_anim_set_values(&a, 0, 100);
+    lv_anim_set_time(&a, 850);
+    lv_anim_set_playback_time(&a, 850);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
+
+    /* Gentle pulse on the emblem, so the hive looks "awake". */
+    static lv_anim_t ap;
+    lv_anim_init(&ap);
+    lv_anim_set_var(&ap, field);
+    lv_anim_set_exec_cb(&ap, splash_opa_cb);
+    lv_anim_set_values(&ap, LV_OPA_50, LV_OPA_COVER);
+    lv_anim_set_time(&ap, 1100);
+    lv_anim_set_playback_time(&ap, 1100);
+    lv_anim_set_repeat_count(&ap, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&ap, lv_anim_path_ease_in_out);
+    lv_anim_start(&ap);
 
     lv_screen_load(s_splash_scr);
     bsp_display_unlock();
