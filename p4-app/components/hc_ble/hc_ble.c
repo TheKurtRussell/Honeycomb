@@ -11,6 +11,8 @@
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/ble_uuid.h"
 #include "host/util/util.h"
 
 #define TAG      "hc_ble"
@@ -202,6 +204,144 @@ void hc_ble_stop(void)
         ble_gap_disc_cancel();
         s_scanning = false;
     }
+}
+
+/* ---- ring a tracker: BLE central connect + DULT "play sound" GATT write ---- */
+
+/* DULT Accessory Non-Owner Service + control characteristic (128-bit, stored
+ * little-endian for NimBLE). Sound_Start opcode 0x0300 -> wire bytes 00 03. */
+static const ble_uuid128_t DULT_SVC = BLE_UUID128_INIT(
+    0x85, 0x2A, 0x9F, 0x57, 0xC5, 0x2A, 0xED, 0x88,
+    0x26, 0xC2, 0xF4, 0x12, 0x01, 0x00, 0x19, 0x15);
+static const ble_uuid128_t DULT_CHR = BLE_UUID128_INIT(
+    0x0E, 0x68, 0x21, 0x74, 0x37, 0x48, 0x61, 0xBF,
+    0x92, 0xFB, 0x68, 0x1D, 0x01, 0x00, 0x0C, 0x8E);
+static const uint8_t DULT_SOUND_START[2] = { 0x00, 0x03 };
+
+static volatile uint8_t s_ring_state = HC_RING_IDLE;
+static uint16_t         s_ring_conn = BLE_HS_CONN_HANDLE_NONE;
+static bool             s_ring_svc_found;   /* sound service located this attempt */
+
+static void ring_finish(uint8_t state)
+{
+    s_ring_state = state;
+    if (s_ring_conn != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_ring_conn, BLE_ERR_REM_USER_CONN_TERM);
+        /* conn cleared on the DISCONNECT event */
+    }
+}
+
+static int ring_write_cb(uint16_t conn, const struct ble_gatt_error *err,
+                         struct ble_gatt_attr *attr, void *arg)
+{
+    (void)conn; (void)attr; (void)arg;
+    ESP_LOGI(TAG, "ring write status=%d", err ? err->status : -1);
+    ring_finish((err && err->status == 0) ? HC_RING_OK : HC_RING_FAIL);
+    return 0;
+}
+
+static int ring_chr_cb(uint16_t conn, const struct ble_gatt_error *err,
+                       const struct ble_gatt_chr *chr, void *arg)
+{
+    (void)arg;
+    if (err && err->status != 0 && err->status != BLE_HS_EDONE) {
+        ring_finish(HC_RING_FAIL);
+        return 0;
+    }
+    if (chr && chr->val_handle) {
+        s_ring_state = HC_RING_WRITING;
+        if (ble_gattc_write_flat(conn, chr->val_handle,
+                                 DULT_SOUND_START, sizeof(DULT_SOUND_START),
+                                 ring_write_cb, NULL) != 0)
+            ring_finish(HC_RING_FAIL);
+    }
+    /* EDONE with no matching characteristic -> failure */
+    else if (err && err->status == BLE_HS_EDONE && s_ring_state == HC_RING_DISCOVERING) {
+        ring_finish(HC_RING_FAIL);
+    }
+    return 0;
+}
+
+static int ring_svc_cb(uint16_t conn, const struct ble_gatt_error *err,
+                       const struct ble_gatt_svc *svc, void *arg)
+{
+    (void)arg;
+    if (err && err->status != 0 && err->status != BLE_HS_EDONE) {
+        ring_finish(HC_RING_FAIL);
+        return 0;
+    }
+    if (svc && svc->start_handle) {
+        /* found the sound service — look for its control characteristic */
+        s_ring_svc_found = true;
+        if (ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle,
+                                        &DULT_CHR.u, ring_chr_cb, NULL) != 0)
+            ring_finish(HC_RING_FAIL);
+    } else if (err && err->status == BLE_HS_EDONE && !s_ring_svc_found) {
+        /* discovery finished and no DULT sound service was present */
+        ring_finish(HC_RING_FAIL);
+    }
+    return 0;
+}
+
+static int ring_gap_cb(struct ble_gap_event *e, void *arg)
+{
+    (void)arg;
+    switch (e->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (e->connect.status == 0) {
+            s_ring_conn = e->connect.conn_handle;
+            s_ring_state = HC_RING_DISCOVERING;
+            if (ble_gattc_disc_svc_by_uuid(s_ring_conn, &DULT_SVC.u,
+                                           ring_svc_cb, NULL) != 0)
+                ring_finish(HC_RING_FAIL);
+        } else {
+            s_ring_conn = BLE_HS_CONN_HANDLE_NONE;
+            s_ring_state = HC_RING_FAIL;
+        }
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        s_ring_conn = BLE_HS_CONN_HANDLE_NONE;
+        if (s_ring_state != HC_RING_OK && s_ring_state != HC_RING_FAIL)
+            s_ring_state = HC_RING_FAIL;
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+bool hc_ble_ring(const uint8_t addr[6], uint8_t addr_type)
+{
+    if (!s_ready || !addr) return false;
+    if (s_ring_state == HC_RING_CONNECTING || s_ring_state == HC_RING_DISCOVERING ||
+        s_ring_state == HC_RING_WRITING) return false;   /* busy */
+
+    hc_ble_stop();                                        /* can't scan + connect */
+
+    uint8_t own = 0;
+    if (ble_hs_id_infer_auto(0, &own) != 0) return false;
+
+    ble_addr_t peer;
+    peer.type = addr_type;
+    memcpy(peer.val, addr, 6);
+
+    s_ring_conn      = BLE_HS_CONN_HANDLE_NONE;
+    s_ring_svc_found = false;
+    s_ring_state     = HC_RING_CONNECTING;
+    /* 8s connect timeout; default connection params. */
+    if (ble_gap_connect(own, &peer, 8000, NULL, ring_gap_cb, NULL) != 0) {
+        s_ring_state = HC_RING_FAIL;
+        return false;
+    }
+    return true;
+}
+
+uint8_t hc_ble_ring_state(void) { return s_ring_state; }
+bool    hc_ble_ring_busy(void)
+{
+    return s_ring_state == HC_RING_CONNECTING ||
+           s_ring_state == HC_RING_DISCOVERING ||
+           s_ring_state == HC_RING_WRITING;
 }
 
 int hc_ble_get(hc_ble_dev_t *out, int max)

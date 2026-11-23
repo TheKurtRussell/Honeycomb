@@ -47,6 +47,27 @@ const char *hc_ble_tracker_name(uint8_t tracker);
 /* Total advertisement reports received since start (for a rate/traffic meter). */
 uint32_t hc_ble_adv_total(void);
 
+/* ---- counter-surveillance: ring a suspected item tracker ----
+ *
+ * Connects to the device as a BLE central and issues the DULT standard
+ * "non-owner play sound" command (works on modern AirTags / Find My network
+ * trackers while they are separated from their owner). Asynchronous: call
+ * hc_ble_ring(), then poll hc_ble_ring_state(). Only one ring at a time. */
+enum {
+    HC_RING_IDLE = 0,
+    HC_RING_CONNECTING,
+    HC_RING_DISCOVERING,
+    HC_RING_WRITING,
+    HC_RING_OK,        /* command accepted — the tag should be chirping */
+    HC_RING_FAIL,      /* couldn't connect / no sound service / rejected */
+};
+
+/* Begin ringing. Returns false if BLE isn't ready or a ring is already in
+ * flight. Pauses scanning for the duration. */
+bool    hc_ble_ring(const uint8_t addr[6], uint8_t addr_type);
+uint8_t hc_ble_ring_state(void);
+bool    hc_ble_ring_busy(void);
+
 /* Bring up the NimBLE host bound to the C6 controller. Returns true if the
  * stack started (the controller syncs asynchronously; see hc_ble_ready). */
 bool hc_ble_start(void);

@@ -283,6 +283,10 @@ static lv_obj_t  *s_fox_big;          /* big RSSI number */
 static lv_obj_t  *s_fox_trend;        /* warmer/colder */
 static lv_obj_t  *s_fox_name;
 static uint8_t    s_fox_addr[6];
+static uint8_t    s_fox_addr_type;
+static uint8_t    s_fox_tracker;
+static lv_obj_t  *s_fox_ring_btn;     /* "ring" button (trackers only) */
+static lv_obj_t  *s_fox_ring_lbl;     /* ring status text */
 static int        s_fox_last = -127;
 static wifi_ap_record_t s_wifi_recs[30];
 static uint16_t   s_wifi_n;
@@ -432,6 +436,7 @@ static void close_tool(lv_event_t *e)
     for (int i = 0; i < RADAR_MAXBLIP; i++) s_radar_blip[i] = NULL;
     s_radar_n = 0;
     s_fox_panel = s_fox_arc = s_fox_big = s_fox_trend = s_fox_name = NULL;
+    s_fox_ring_btn = s_fox_ring_lbl = NULL;
     s_fox_last = -127;
     s_ble_last_n = -1;
     s_conn_panel = s_conn_pw = s_conn_kb = NULL;
@@ -1662,6 +1667,27 @@ static void fox_update(void)
         lv_obj_set_style_text_color(s_fox_trend, lv_color_hex(tc), 0);
     }
     if (found) s_fox_last = rssi;
+
+    /* Ring status (trackers only). */
+    if (s_fox_ring_lbl) {
+        const char *msg; uint32_t col;
+        switch (hc_ble_ring_state()) {
+            case HC_RING_CONNECTING:  msg = "connecting...";       col = HC_LHONEY; break;
+            case HC_RING_DISCOVERING: msg = "finding sound svc..."; col = HC_LHONEY; break;
+            case HC_RING_WRITING:     msg = "sending ring...";      col = HC_LHONEY; break;
+            case HC_RING_OK:          msg = "ringing " LV_SYMBOL_BELL; col = HC_GREEN; break;
+            case HC_RING_FAIL:        msg = "no ring (separated-mode only)"; col = HC_RED; break;
+            default:                  msg = "";                     col = HC_DIMTXT; break;
+        }
+        lv_label_set_text(s_fox_ring_lbl, msg);
+        lv_obj_set_style_text_color(s_fox_ring_lbl, lv_color_hex(col), 0);
+    }
+}
+
+static void fox_ring_cb(lv_event_t *e)
+{
+    (void)e;
+    hc_ble_ring(s_fox_addr, s_fox_addr_type);
 }
 
 static void fox_close_cb(lv_event_t *e)
@@ -1669,6 +1695,7 @@ static void fox_close_cb(lv_event_t *e)
     (void)e;
     if (s_fox_panel) { lv_obj_delete_async(s_fox_panel); s_fox_panel = NULL; }
     s_fox_arc = s_fox_big = s_fox_trend = s_fox_name = NULL;
+    s_fox_ring_btn = s_fox_ring_lbl = NULL;
     s_fox_last = -127;
 }
 
@@ -1677,6 +1704,8 @@ static void open_foxhunt(int idx)
 {
     if (s_fox_panel || idx < 0 || idx >= s_radar_n) return;
     memcpy(s_fox_addr, s_radar_devs[idx].addr, 6);
+    s_fox_addr_type = s_radar_devs[idx].addr_type;
+    s_fox_tracker   = s_radar_devs[idx].tracker;
     s_fox_last = -127;
 
     const char *ven = hc_ble_vendor(s_radar_devs[idx].company_id);
@@ -1735,6 +1764,27 @@ static void open_foxhunt(int idx)
     lv_label_set_text(dl, "back to radar");
     lv_obj_set_style_text_color(dl, lv_color_hex(HC_CYAN), 0);
     lv_obj_center(dl);
+
+    /* For flagged item-trackers: a Ring button (counter-surveillance). */
+    s_fox_ring_btn = s_fox_ring_lbl = NULL;
+    if (s_fox_tracker) {
+        s_fox_ring_btn = lv_button_create(s_fox_panel);
+        lv_obj_set_size(s_fox_ring_btn, 200, 56);
+        lv_obj_align(s_fox_ring_btn, LV_ALIGN_BOTTOM_MID, 0, -92);
+        lv_obj_set_style_bg_color(s_fox_ring_btn, lv_color_hex(HC_PANEL), 0);
+        lv_obj_set_style_border_color(s_fox_ring_btn, lv_color_hex(HC_RED), 0);
+        lv_obj_set_style_border_width(s_fox_ring_btn, 1, 0);
+        lv_obj_add_event_cb(s_fox_ring_btn, fox_ring_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *rl = lv_label_create(s_fox_ring_btn);
+        lv_label_set_text(rl, LV_SYMBOL_BELL "  ring tracker");
+        lv_obj_set_style_text_color(rl, lv_color_hex(HC_RED), 0);
+        lv_obj_center(rl);
+
+        s_fox_ring_lbl = lv_label_create(s_fox_panel);
+        lv_label_set_text(s_fox_ring_lbl, "");
+        lv_obj_set_style_text_color(s_fox_ring_lbl, lv_color_hex(HC_DIMTXT), 0);
+        lv_obj_align(s_fox_ring_lbl, LV_ALIGN_BOTTOM_MID, 0, -156);
+    }
 }
 
 static void blip_click_cb(lv_event_t *e)
@@ -1747,6 +1797,10 @@ static void radar_tick(lv_timer_t *t)
 {
     (void)t;
     if (!s_radar_area) return;
+
+    /* Resume scanning after a ring attempt releases the radio. */
+    if (hc_ble_ready() && !hc_ble_scanning() && !hc_ble_ring_busy())
+        hc_ble_scan(0);
 
     /* Rake the leading edge back and forth across the fan (degrees). */
     s_radar_ang += s_radar_dir * 1.4f;
