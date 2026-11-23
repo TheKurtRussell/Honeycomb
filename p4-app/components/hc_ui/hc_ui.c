@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <math.h>
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_log.h"
@@ -84,7 +85,7 @@ static lv_obj_t *s_frames_lbl;
 static uint32_t  s_frame_count;
 
 
-enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_DECODE, TOOL_MESH, TOOL_CONFIG, TOOL_FILES };
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES };
 
 typedef struct {
     int col, row;
@@ -99,7 +100,7 @@ typedef struct {
  * every direction from the start. Every other cell is an empty comb cell. */
 static const hc_tile_t s_tiles[] = {
     {7, 2, LV_SYMBOL_DIRECTORY, "files",   HC_HONEY, HC_LHONEY, TOOL_FILES},
-    {6, 3, LV_SYMBOL_LIST,     "decode",   HC_HONEY, HC_LHONEY, TOOL_DECODE},
+    {6, 3, LV_SYMBOL_GPS,      "radar",    HC_CYAN,  HC_LCYAN,  TOOL_RADAR},
     {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY, TOOL_BENCH},
     {8, 3, LV_SYMBOL_BLUETOOTH, "ble",     HC_CYAN,  HC_LCYAN,  TOOL_BLE},
     {6, 4, LV_SYMBOL_SETTINGS, "config",   HC_HONEY, HC_LHONEY, TOOL_CONFIG},
@@ -235,6 +236,12 @@ static lv_obj_t  *s_wifi_list;        /* explorer: AP list container */
 static lv_obj_t  *s_wifi_status;      /* explorer: "scanning..."/"N networks" */
 static lv_obj_t  *s_ble_list;         /* ble: device list container */
 static lv_obj_t  *s_ble_status;       /* ble: "scanning..."/"N devices" */
+static lv_obj_t  *s_radar_area;       /* radar: the circular scope */
+static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
+static lv_obj_t  *s_radar_blips;      /* radar: container for device blips */
+static lv_obj_t  *s_radar_info;       /* radar: status/closest-device label */
+static float      s_radar_ang;        /* radar: current sweep angle (rad) */
+static int        s_radar_tick;       /* radar: tick counter for data refresh */
 static wifi_ap_record_t s_wifi_recs[30];
 static uint16_t   s_wifi_n;
 static volatile bool s_wifi_scanning;
@@ -356,6 +363,7 @@ static void close_tool(lv_event_t *e)
 {
     (void)e;
     hc_flasher_monitor_stop();            /* harmless if no monitor is running */
+    hc_ble_stop();                        /* stop any BLE scan (ble node / radar) */
     if (s_tool_timer) { lv_timer_delete(s_tool_timer); s_tool_timer = NULL; }
     if (s_flash_panel){ lv_obj_delete_async(s_flash_panel); s_flash_panel = NULL; }
     if (s_overlay)    { lv_obj_delete_async(s_overlay); s_overlay = NULL; }
@@ -367,6 +375,7 @@ static void close_tool(lv_event_t *e)
     s_fb_list = s_fb_pathlbl = NULL;
     s_wifi_list = s_wifi_status = NULL;
     s_ble_list = s_ble_status = NULL;
+    s_radar_area = s_radar_sweep = s_radar_blips = s_radar_info = NULL;
     s_conn_panel = s_conn_pw = s_conn_kb = NULL;
     s_c6ota_panel = s_c6ota_status = s_c6ota_bar = NULL;
     s_tool_pending = false;
@@ -1335,6 +1344,150 @@ static void open_ble(void)
     s_tool_timer = lv_timer_create(ble_refresh, 600, NULL);  /* live refresh */
 }
 
+/* ---- radar: BLE devices placed by signal strength on a sweeping scope ---- */
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#define RADAR_SZ  580
+#define RADAR_C   290            /* center x/y within the area */
+#define RADAR_R   268            /* outer ring radius */
+#define RSSI_NEAR (-35)          /* maps to the centre */
+#define RSSI_FAR  (-100)         /* maps to the outer ring */
+
+static lv_point_precise_t s_sweep_pts[2];
+
+/* Stable angle (radians) for a device from its address, so each keeps its place. */
+static float blip_angle(const uint8_t *a)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 6; i++) h = (h ^ a[i]) * 16777619u;
+    return (float)(h % 3600) / 10.0f * (float)M_PI / 180.0f;
+}
+
+/* Radius for an RSSI: strong -> centre, weak -> edge. */
+static float blip_radius(int rssi)
+{
+    float t = (float)(RSSI_NEAR - rssi) / (float)(RSSI_NEAR - RSSI_FAR);
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    return RADAR_R * t;
+}
+
+static void radar_tick(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_radar_area) return;
+
+    /* Rotate the sweep line. */
+    s_radar_ang += 0.09f;
+    if (s_radar_ang > 2 * (float)M_PI) s_radar_ang -= 2 * (float)M_PI;
+    s_sweep_pts[0].x = RADAR_C;
+    s_sweep_pts[0].y = RADAR_C;
+    s_sweep_pts[1].x = RADAR_C + (lv_value_precise_t)(RADAR_R * cosf(s_radar_ang));
+    s_sweep_pts[1].y = RADAR_C + (lv_value_precise_t)(RADAR_R * sinf(s_radar_ang));
+    if (s_radar_sweep) lv_line_set_points(s_radar_sweep, s_sweep_pts, 2);
+
+    /* Refresh the blips from the live table ~ every 720ms. */
+    if (++s_radar_tick % 9 != 0 || !s_radar_blips) return;
+
+    static hc_ble_dev_t devs[48];
+    int n = hc_ble_get(devs, 48);
+    lv_obj_clean(s_radar_blips);
+    for (int i = 0; i < n; i++) {
+        float ang = blip_angle(devs[i].addr);
+        float r   = blip_radius(devs[i].rssi);
+        int x = RADAR_C + (int)(r * cosf(ang));
+        int y = RADAR_C + (int)(r * sinf(ang));
+        int sz = devs[i].rssi > -55 ? 16 : devs[i].rssi > -75 ? 12 : 9;
+        lv_obj_t *b = lv_obj_create(s_radar_blips);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_size(b, sz, sz);
+        lv_obj_set_pos(b, x - sz / 2, y - sz / 2);
+        lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        uint32_t col = devs[i].rssi > -60 ? HC_HONEY :
+                       devs[i].rssi > -80 ? HC_LHONEY : HC_CYAN;
+        lv_obj_set_style_bg_color(b, lv_color_hex(col), 0);
+    }
+
+    if (s_radar_info) {
+        char info[64];
+        if (n) {
+            const char *who = devs[0].name[0] ? devs[0].name :
+                              (hc_ble_vendor(devs[0].company_id)[0] ?
+                               hc_ble_vendor(devs[0].company_id) : "device");
+            snprintf(info, sizeof(info), "%d contacts   ·   closest: %s %ddBm",
+                     n, who, devs[0].rssi);
+        } else {
+            snprintf(info, sizeof(info), "scanning...");
+        }
+        lv_label_set_text(s_radar_info, info);
+    }
+}
+
+static void open_radar(void)
+{
+    lv_obj_t *ov = tool_shell("radar");
+
+    s_radar_info = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_radar_info, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_radar_info, LV_ALIGN_TOP_LEFT, 44, 100);
+    lv_label_set_text(s_radar_info, hc_ble_ready() ? "scanning..." : "BLE not available");
+
+    s_radar_area = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_radar_area);
+    lv_obj_set_size(s_radar_area, RADAR_SZ, RADAR_SZ);
+    lv_obj_align(s_radar_area, LV_ALIGN_CENTER, 0, 24);
+    lv_obj_remove_flag(s_radar_area, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Concentric range rings. */
+    for (int k = 1; k <= 4; k++) {
+        int d = (RADAR_R * k / 4) * 2;
+        lv_obj_t *ring = lv_obj_create(s_radar_area);
+        lv_obj_remove_style_all(ring);
+        lv_obj_set_size(ring, d, d);
+        lv_obj_set_pos(ring, RADAR_C - d / 2, RADAR_C - d / 2);
+        lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_color(ring, lv_color_hex(0x1C4A4A), 0);
+        lv_obj_set_style_border_width(ring, 1, 0);
+        lv_obj_set_style_border_opa(ring, LV_OPA_COVER, 0);
+    }
+    /* Crosshair bars through the centre. */
+    lv_obj_t *hbar = lv_obj_create(s_radar_area);
+    lv_obj_remove_style_all(hbar);
+    lv_obj_set_size(hbar, RADAR_R * 2, 1);
+    lv_obj_set_pos(hbar, RADAR_C - RADAR_R, RADAR_C);
+    lv_obj_set_style_bg_color(hbar, lv_color_hex(0x1C4A4A), 0);
+    lv_obj_set_style_bg_opa(hbar, LV_OPA_COVER, 0);
+    lv_obj_t *vbar = lv_obj_create(s_radar_area);
+    lv_obj_remove_style_all(vbar);
+    lv_obj_set_size(vbar, 1, RADAR_R * 2);
+    lv_obj_set_pos(vbar, RADAR_C, RADAR_C - RADAR_R);
+    lv_obj_set_style_bg_color(vbar, lv_color_hex(0x1C4A4A), 0);
+    lv_obj_set_style_bg_opa(vbar, LV_OPA_COVER, 0);
+
+    /* Sweep line. */
+    s_sweep_pts[0].x = s_sweep_pts[1].x = RADAR_C;
+    s_sweep_pts[0].y = s_sweep_pts[1].y = RADAR_C;
+    s_radar_sweep = lv_line_create(s_radar_area);
+    lv_line_set_points(s_radar_sweep, s_sweep_pts, 2);
+    lv_obj_set_style_line_color(s_radar_sweep, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_line_width(s_radar_sweep, 2, 0);
+    lv_obj_set_style_line_rounded(s_radar_sweep, true, 0);
+
+    /* Blip layer on top. */
+    s_radar_blips = lv_obj_create(s_radar_area);
+    lv_obj_remove_style_all(s_radar_blips);
+    lv_obj_set_size(s_radar_blips, RADAR_SZ, RADAR_SZ);
+    lv_obj_set_pos(s_radar_blips, 0, 0);
+    lv_obj_remove_flag(s_radar_blips, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_radar_ang = 0;
+    s_radar_tick = 0;
+    if (hc_ble_ready() && !hc_ble_scanning()) hc_ble_scan(0);   /* continuous */
+    s_tool_timer = lv_timer_create(radar_tick, 80, NULL);
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -1346,6 +1499,7 @@ static void async_open_tool(void *p)
         case TOOL_FILES:    open_files(); break;
         case TOOL_EXPLORER: open_explorer(); break;
         case TOOL_BLE:      open_ble(); break;
+        case TOOL_RADAR:    open_radar(); break;
         default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
 }

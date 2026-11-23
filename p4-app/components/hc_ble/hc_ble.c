@@ -154,6 +154,14 @@ void hc_ble_scan(uint32_t ms)
 bool hc_ble_scanning(void) { return s_scanning; }
 bool hc_ble_ready(void)    { return s_ready; }
 
+void hc_ble_stop(void)
+{
+    if (s_scanning) {
+        ble_gap_disc_cancel();
+        s_scanning = false;
+    }
+}
+
 int hc_ble_get(hc_ble_dev_t *out, int max)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);

@@ -45,6 +45,9 @@ void hc_ble_scan(uint32_t ms);
 /* True while a scan is in progress. */
 bool hc_ble_scanning(void);
 
+/* Stop an in-progress scan (no-op if idle). */
+void hc_ble_stop(void);
+
 /* Snapshot up to `max` discovered devices into `out`, sorted strongest-first.
  * Returns the number written. Safe to call from any task. */
 int hc_ble_get(hc_ble_dev_t *out, int max);
