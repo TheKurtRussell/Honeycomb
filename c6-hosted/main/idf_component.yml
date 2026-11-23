@@ -1,0 +1,6 @@
+dependencies:
+  # The ESP-Hosted coprocessor (slave) firmware. Keep in step with the host's
+  # esp_hosted (pulled by esp_wifi_remote in p4-app) so host/slave versions match.
+  espressif/esp_hosted: "*"
+  idf:
+    version: ">=5.5"

@@ -1,0 +1,32 @@
+# Honeycomb C6 coprocessor — ESP-Hosted slave, Wi-Fi + BLE over SDIO.
+#
+# Role: coprocessor (slave) for an MCU host (the P4), RPC v2 (matches the 3.1.0
+# host we build in p4-app). SDIO transport auto-selects on the C6
+# (EH_TRANSPORT_CP_SDIO defaults on when the SoC has an SDIO slave).
+CONFIG_ESP_HOSTED=y
+CONFIG_ESP_HOSTED_CP=y
+CONFIG_ESP_HOSTED_CP_FOR_MCU=y
+CONFIG_ESP_HOSTED_CP_RPC_V2=y
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+CONFIG_ESP_HOSTED_CP_FEAT_WIFI=y
+
+# BLE: the coprocessor runs the BT controller only; HCI is carried to the P4
+# host over the transport (RAM-backed HCI, i.e. over SDIO). The host owns the
+# BLE host stack. This is what the factory WLAN-only slave was missing.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ONLY=y
+CONFIG_BT_LE_HCI_INTERFACE_USE_RAM=y
+CONFIG_ESP_HOSTED_CP_FEAT_BT=y
+
+# 4 MB flash + dual-OTA partition table — this is what makes the C6 reflashable
+# by the host over SDIO (write inactive slot, activate, bootloader rolls back if
+# the new image fails to confirm).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_eh_cp_ota_4m.csv"
+
+# Keep the image comfortably under the 1.75 MB OTA slot.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_WIFI_NVS_ENABLED=y
