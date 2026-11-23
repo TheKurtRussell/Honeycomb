@@ -42,6 +42,9 @@ esp_err_t hc_storage_read_head(const char *path, char *buf, size_t cap, size_t *
 /* Delete a file. */
 esp_err_t hc_storage_delete(const char *path);
 
+/* Copy a file from src to dst (overwrites dst). */
+esp_err_t hc_storage_copy(const char *src, const char *dst);
+
 /* Save a text blob (e.g. the serial monitor log) to a fresh
  * /sdcard/honeycomb/serial-NNN.txt and return its path in path_out. */
 esp_err_t hc_storage_save_log(const char *text, char *path_out, size_t cap);

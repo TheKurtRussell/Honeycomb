@@ -164,6 +164,25 @@ esp_err_t hc_storage_delete(const char *path)
     return (remove(path) == 0) ? ESP_OK : ESP_FAIL;
 }
 
+esp_err_t hc_storage_copy(const char *src, const char *dst)
+{
+    if (!src || !dst) return ESP_ERR_INVALID_ARG;
+    if (!s_mounted) return ESP_ERR_INVALID_STATE;
+    FILE *in = fopen(src, "rb");
+    if (!in) return ESP_FAIL;
+    FILE *out = fopen(dst, "wb");
+    if (!out) { fclose(in); return ESP_FAIL; }
+    static uint8_t buf[2048];
+    size_t r;
+    esp_err_t ret = ESP_OK;
+    while ((r = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, r, out) != r) { ret = ESP_FAIL; break; }
+    }
+    fclose(in);
+    fclose(out);
+    return ret;
+}
+
 esp_err_t hc_storage_save_log(const char *text, char *path_out, size_t cap)
 {
     if (!s_mounted) return ESP_ERR_INVALID_STATE;

@@ -288,6 +288,7 @@ static lv_obj_t  *s_fv_text;          /* file viewer text label */
 static char       s_fv_path[224];     /* full path of the viewed file */
 static bool       s_fv_delarm;        /* delete button armed (two-tap confirm) */
 static char       s_fv_buf[8192];     /* file head for viewing */
+static char       s_clip_path[224];   /* copy/paste clipboard (source path) */
 static char       s_log_buf[2560];
 static size_t     s_log_len;
 static char       s_flash_path[HC_PATH_MAX];
@@ -1009,6 +1010,13 @@ static void fv_close_cb(lv_event_t *e)
     s_fv_text = NULL;
 }
 
+static void fv_copy_cb(lv_event_t *e)
+{
+    (void)e;
+    strlcpy(s_clip_path, s_fv_path, sizeof(s_clip_path));
+    fv_close_cb(NULL);                         /* close; navigate + paste elsewhere */
+}
+
 static void fv_delete_cb(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
@@ -1085,6 +1093,18 @@ static void open_file_viewer(const char *name)
     lv_obj_set_style_text_color(dll, lv_color_hex(HC_RED), 0);
     lv_obj_center(dll);
 
+    lv_obj_t *cpy = lv_button_create(s_fv_panel);
+    lv_obj_set_size(cpy, 160, 54);
+    lv_obj_align(cpy, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_set_style_bg_color(cpy, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(cpy, lv_color_hex(HC_HONEY), 0);
+    lv_obj_set_style_border_width(cpy, 1, 0);
+    lv_obj_add_event_cb(cpy, fv_copy_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cpl = lv_label_create(cpy);
+    lv_label_set_text(cpl, LV_SYMBOL_COPY "  copy");
+    lv_obj_set_style_text_color(cpl, lv_color_hex(HC_HONEY), 0);
+    lv_obj_center(cpl);
+
     lv_obj_t *cls = lv_button_create(s_fv_panel);
     lv_obj_set_size(cls, 160, 54);
     lv_obj_align(cls, LV_ALIGN_BOTTOM_RIGHT, -32, -18);
@@ -1103,6 +1123,19 @@ static void fb_file_cb(lv_event_t *e)
     open_file_viewer((const char *)lv_event_get_user_data(e));
 }
 
+static void fb_paste_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_clip_path[0]) return;
+    const char *base = strrchr(s_clip_path, '/');
+    base = base ? base + 1 : s_clip_path;
+    char dst[300];
+    snprintf(dst, sizeof(dst), "%s/%s", s_fb_path, base);
+    hc_storage_copy(s_clip_path, dst);
+    s_clip_path[0] = 0;
+    lv_async_call(fb_refresh, NULL);
+}
+
 static void fb_populate(void)
 {
     if (!s_fb_list) return;
@@ -1115,6 +1148,15 @@ static void fb_populate(void)
     if (strcmp(s_fb_path, "/sdcard") != 0) {
         lv_obj_t *up = fb_row(LV_SYMBOL_UP "  ..", true);
         lv_obj_add_event_cb(up, fb_up_cb, LV_EVENT_CLICKED, NULL);
+    }
+    if (s_clip_path[0]) {                      /* clipboard set -> offer paste */
+        const char *base = strrchr(s_clip_path, '/');
+        base = base ? base + 1 : s_clip_path;
+        char pl[140];
+        snprintf(pl, sizeof(pl), LV_SYMBOL_PASTE "  paste \"%s\" here", base);
+        lv_obj_t *pr = fb_row(pl, true);
+        lv_obj_set_style_bg_color(pr, lv_color_hex(HC_PANEL), 0);
+        lv_obj_add_event_cb(pr, fb_paste_cb, LV_EVENT_CLICKED, NULL);
     }
     for (int i = 0; i < n; i++) {
         char label[112];
