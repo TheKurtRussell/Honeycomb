@@ -25,6 +25,7 @@ typedef struct {
     int8_t   rssi_last;   /* most recent RSSI */
     uint8_t  channel;     /* wifi primary channel (0 for ble) */
     uint16_t company;     /* ble company id (0xFFFF if none) */
+    uint8_t  tracker;     /* HC_TRACK_* item-tracker class (ble only, 0 = none) */
     uint32_t count;       /* number of sightings */
     uint32_t first_s;     /* uptime seconds, first seen */
     uint32_t last_s;      /* uptime seconds, last seen */
@@ -37,7 +38,8 @@ void hc_scanlog_init(void);
 /* Record a sighting. De-dups by MAC in RAM; the first time a MAC is seen it is
  * also appended to the SD CSV. Returns true on a first (new) sighting. */
 bool hc_scanlog_wifi(const char *ssid, const uint8_t mac[6], int rssi, int channel);
-bool hc_scanlog_ble(const uint8_t mac[6], int rssi, uint16_t company, const char *name);
+bool hc_scanlog_ble(const uint8_t mac[6], int rssi, uint16_t company, const char *name,
+                    uint8_t tracker);
 
 /* Copy up to `max` entries into out, most-recently-seen first. Returns count. */
 int  hc_scanlog_get_wifi(hc_scanlog_entry_t *out, int max);

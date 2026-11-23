@@ -16,12 +16,23 @@
 extern "C" {
 #endif
 
+/* Item-tracker classification (counter-surveillance). */
+enum {
+    HC_TRACK_NONE = 0,
+    HC_TRACK_APPLE,    /* Apple Find My / AirTag (separated) */
+    HC_TRACK_TILE,     /* Tile */
+    HC_TRACK_SAMSUNG,  /* Samsung SmartTag / Galaxy Find */
+    HC_TRACK_GENERIC,  /* other known finder service */
+};
+
 typedef struct {
     uint8_t  addr[6];
     int8_t   rssi;
     uint8_t  addr_type;   /* 0 = public (OUI-identifiable), else random/private */
     uint16_t company_id;  /* BLE SIG company ID from mfg data, 0xFFFF if none */
     uint16_t appearance;  /* GAP appearance, 0 if not advertised */
+    uint16_t svc_uuid;    /* first 16-bit (service/service-data) UUID, 0 if none */
+    uint8_t  tracker;     /* HC_TRACK_* classification */
     bool     connectable; /* advertiser accepts connections */
     char     name[32];    /* "" if the advertiser sent no name */
 } hc_ble_dev_t;
@@ -30,6 +41,11 @@ typedef struct {
 const char *hc_ble_vendor(uint16_t company_id);
 /* Human-readable device kind for a GAP appearance value ("" if unknown/0). */
 const char *hc_ble_appearance_name(uint16_t appearance);
+/* Human-readable item-tracker label for a HC_TRACK_* value ("" if NONE). */
+const char *hc_ble_tracker_name(uint8_t tracker);
+
+/* Total advertisement reports received since start (for a rate/traffic meter). */
+uint32_t hc_ble_adv_total(void);
 
 /* Bring up the NimBLE host bound to the C6 controller. Returns true if the
  * stack started (the controller syncs asynchronously; see hc_ble_ready). */

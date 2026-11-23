@@ -21,12 +21,16 @@ static int              s_ndev;
 static SemaphoreHandle_t s_lock;
 static volatile bool    s_ready;
 static volatile bool    s_scanning;
+static volatile uint32_t s_adv_total;   /* advertisement reports seen (traffic meter) */
 
 /* Find-or-add by address, then update RSSI/identity from this report. */
 static void add_report(const struct ble_gap_disc_desc *d)
 {
+    s_adv_total++;
+
     char name[32] = "";
-    uint16_t company = 0xFFFF, appearance = 0;
+    uint16_t company = 0xFFFF, appearance = 0, svc_uuid = 0;
+    uint8_t  tracker = HC_TRACK_NONE;
     struct ble_hs_adv_fields f;
     if (ble_hs_adv_parse_fields(&f, d->data, d->length_data) == 0) {
         if (f.name_len) {
@@ -38,6 +42,22 @@ static void add_report(const struct ble_gap_disc_desc *d)
             company = f.mfg_data[0] | (f.mfg_data[1] << 8);   /* little-endian company ID */
         if (f.appearance_is_present)
             appearance = f.appearance;
+
+        /* First advertised 16-bit UUID (service list or service-data). */
+        if (f.num_uuids16 > 0)
+            svc_uuid = ble_uuid_u16(&f.uuids16[0].u);
+        if (!svc_uuid && f.svc_data_uuid16 && f.svc_data_uuid16_len >= 2)
+            svc_uuid = f.svc_data_uuid16[0] | (f.svc_data_uuid16[1] << 8);
+
+        /* Item-tracker classification (counter-surveillance). */
+        if (company == 0x004C && f.mfg_data_len >= 3 && f.mfg_data[2] == 0x12)
+            tracker = HC_TRACK_APPLE;              /* Apple Find My (separated AirTag) */
+        else if (svc_uuid == 0xFEED || svc_uuid == 0xFEEC)
+            tracker = HC_TRACK_TILE;               /* Tile */
+        else if (svc_uuid == 0xFD5A || svc_uuid == 0xFD59)
+            tracker = HC_TRACK_SAMSUNG;            /* Samsung SmartTag */
+        else if (svc_uuid == 0xFCF1 || svc_uuid == 0xFE33)
+            tracker = HC_TRACK_GENERIC;            /* Google / Chipolo finder */
     }
     /* Legacy adv event types (BT spec): 0=ADV_IND, 1=ADV_DIRECT_IND are the
      * connectable ones; 2=SCAN_IND, 3=NONCONN_IND, 4=SCAN_RSP are not. */
@@ -53,6 +73,8 @@ static void add_report(const struct ble_gap_disc_desc *d)
         s_dev[i].name[0]   = 0;
         s_dev[i].company_id = 0xFFFF;
         s_dev[i].appearance = 0;
+        s_dev[i].svc_uuid   = 0;
+        s_dev[i].tracker    = HC_TRACK_NONE;
     }
     if (i < MAXDEV) {
         s_dev[i].rssi      = d->rssi;
@@ -61,12 +83,14 @@ static void add_report(const struct ble_gap_disc_desc *d)
         if (name[0])            strlcpy(s_dev[i].name, name, sizeof(s_dev[i].name));
         if (company != 0xFFFF)  s_dev[i].company_id = company;
         if (appearance)         s_dev[i].appearance = appearance;
+        if (svc_uuid)           s_dev[i].svc_uuid = svc_uuid;
+        if (tracker != HC_TRACK_NONE) s_dev[i].tracker = tracker;
     }
     xSemaphoreGive(s_lock);
 
     /* Logbook: record every unique sighting (dedups + appends to SD itself).
      * Done outside s_lock so SD I/O never stalls the BLE device table. */
-    hc_scanlog_ble(d->addr.val, d->rssi, company, name);
+    hc_scanlog_ble(d->addr.val, d->rssi, company, name, tracker);
 }
 
 /* BLE SIG assigned company identifiers (the common ones you'll see around). */
@@ -95,6 +119,19 @@ const char *hc_ble_vendor(uint16_t cid)
         default:     return "";
     }
 }
+
+const char *hc_ble_tracker_name(uint8_t t)
+{
+    switch (t) {
+        case HC_TRACK_APPLE:   return "Apple Find My";
+        case HC_TRACK_TILE:    return "Tile";
+        case HC_TRACK_SAMSUNG: return "Samsung SmartTag";
+        case HC_TRACK_GENERIC: return "finder tag";
+        default:               return "";
+    }
+}
+
+uint32_t hc_ble_adv_total(void) { return s_adv_total; }
 
 /* GAP appearance categories (top 10 bits select the category). */
 const char *hc_ble_appearance_name(uint16_t a)

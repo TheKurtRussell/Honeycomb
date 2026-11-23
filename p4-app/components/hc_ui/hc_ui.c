@@ -95,7 +95,7 @@ static lv_obj_t *s_wifi_dot;
 static lv_obj_t *s_ble_dot;
 
 
-enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS };
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS, TOOL_TRAFFIC };
 
 typedef struct {
     int col, row;
@@ -109,6 +109,7 @@ typedef struct {
 /* The six live tools, clustered near the comb's center so the hive extends in
  * every direction from the start. Every other cell is an empty comb cell. */
 static const hc_tile_t s_tiles[] = {
+    {6, 2, LV_SYMBOL_CHARGE,   "traffic",  HC_CYAN,  HC_LCYAN,  TOOL_TRAFFIC},
     {7, 2, LV_SYMBOL_DIRECTORY, "files",   HC_HONEY, HC_LHONEY, TOOL_FILES},
     {8, 2, LV_SYMBOL_LIST,     "logbook",  HC_HONEY, HC_LHONEY, TOOL_LOGS},
     {6, 3, LV_SYMBOL_GPS,      "radar",    HC_CYAN,  HC_LCYAN,  TOOL_RADAR},
@@ -253,6 +254,12 @@ static lv_obj_t  *s_log_count;        /* logbook: header count label */
 static lv_obj_t  *s_log_tab_wifi;     /* logbook: tab buttons */
 static lv_obj_t  *s_log_tab_ble;
 static bool       s_log_show_ble;     /* logbook: which table is shown */
+static lv_obj_t  *s_traf_wifi;        /* traffic: wifi link detail label */
+static lv_obj_t  *s_traf_ble;         /* traffic: ble rate detail label */
+static lv_obj_t  *s_traf_chart;       /* traffic: live RSSI chart */
+static lv_chart_series_t *s_traf_ser; /* traffic: RSSI series */
+static uint32_t   s_traf_adv_last;    /* traffic: last advert total */
+static uint32_t   s_traf_ms_last;     /* traffic: last sample time (ms) */
 #define RADAR_MAXBLIP 48
 static lv_obj_t  *s_radar_area;       /* radar: the circular scope */
 static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
@@ -425,6 +432,8 @@ static void close_tool(lv_event_t *e)
     s_conn_panel = s_conn_pw = s_conn_kb = NULL;
     s_c6ota_panel = s_c6ota_status = s_c6ota_bar = NULL;
     s_log_list = s_log_count = s_log_tab_wifi = s_log_tab_ble = NULL;
+    s_traf_wifi = s_traf_ble = s_traf_chart = NULL;
+    s_traf_ser = NULL;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -1883,10 +1892,20 @@ static void log_populate(void)
     int n = s_log_show_ble ? hc_scanlog_get_ble(rows, 128)
                            : hc_scanlog_get_wifi(rows, 128);
 
+    int trackers = 0;
+    if (s_log_show_ble)
+        for (int i = 0; i < n; i++) if (rows[i].tracker) trackers++;
+
     if (s_log_count) {
-        char c[48];
-        snprintf(c, sizeof(c), "%d %s logged", n, s_log_show_ble ? "devices" : "networks");
+        char c[64];
+        if (s_log_show_ble && trackers)
+            snprintf(c, sizeof(c), "%d devices  ·  %d tracker%s",
+                     n, trackers, trackers == 1 ? "" : "s");
+        else
+            snprintf(c, sizeof(c), "%d %s logged", n, s_log_show_ble ? "devices" : "networks");
         lv_label_set_text(s_log_count, c);
+        lv_obj_set_style_text_color(s_log_count,
+            lv_color_hex((s_log_show_ble && trackers) ? HC_RED : HC_CYAN), 0);
     }
 
     if (n == 0) {
@@ -1907,16 +1926,28 @@ static void log_populate(void)
         lv_obj_set_style_pad_left(row, 8, 0);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
-        /* line 1: label (ssid / name / vendor) */
+        bool is_tracker = s_log_show_ble && rows[i].tracker;
+        if (is_tracker) {               /* highlight a possible follower */
+            lv_obj_set_style_border_color(row, lv_color_hex(HC_RED), 0);
+            lv_obj_set_style_border_width(row, 1, 0);
+        }
+
+        /* line 1: label (ssid / name / vendor), with a tracker tag if flagged */
         const char *who = rows[i].label[0] ? rows[i].label : NULL;
         if (!who && s_log_show_ble) {
             const char *v = hc_ble_vendor(rows[i].company);
             who = v[0] ? v : "(unknown)";
         }
         if (!who) who = "(hidden)";
+        char l1s[72];
+        if (is_tracker)
+            snprintf(l1s, sizeof(l1s), LV_SYMBOL_WARNING " %s  [%s]",
+                     who, hc_ble_tracker_name(rows[i].tracker));
+        else
+            snprintf(l1s, sizeof(l1s), "%s", who);
         lv_obj_t *l1 = lv_label_create(row);
-        lv_label_set_text(l1, who);
-        lv_obj_set_style_text_color(l1, lv_color_hex(HC_LHONEY), 0);
+        lv_label_set_text(l1, l1s);
+        lv_obj_set_style_text_color(l1, lv_color_hex(is_tracker ? HC_RED : HC_LHONEY), 0);
         lv_obj_align(l1, LV_ALIGN_TOP_LEFT, 0, 4);
 
         /* line 2: mac · best rssi · times seen */
@@ -1999,6 +2030,109 @@ static void open_logbook(void)
     log_populate();
 }
 
+/* ---- traffic / telemetry meter: live link quality + packet rates ---- */
+
+static void traffic_tick(lv_timer_t *t)
+{
+    (void)t;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+
+    /* WiFi link detail (if associated). */
+    if (s_traf_wifi) {
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            char w[160];
+            snprintf(w, sizeof(w),
+                     "linked: %s\nch %d   ·   %d dBm   ·   %02X:%02X:%02X:%02X:%02X:%02X",
+                     (char *)ap.ssid, ap.primary, ap.rssi,
+                     ap.bssid[0], ap.bssid[1], ap.bssid[2],
+                     ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+            lv_label_set_text(s_traf_wifi, w);
+            lv_obj_set_style_text_color(s_traf_wifi, lv_color_hex(HC_LHONEY), 0);
+            if (s_traf_chart && s_traf_ser) {
+                lv_chart_set_next_value(s_traf_chart, s_traf_ser, ap.rssi);
+            }
+        } else {
+            lv_label_set_text(s_traf_wifi, "not connected\njoin a network from the explorer node");
+            lv_obj_set_style_text_color(s_traf_wifi, lv_color_hex(HC_DIMTXT), 0);
+        }
+    }
+
+    /* BLE advertisement rate (packets/sec) + unique devices this scan. */
+    if (s_traf_ble) {
+        uint32_t adv = hc_ble_adv_total();
+        float dt = (now_ms - s_traf_ms_last) / 1000.0f;
+        float rate = (dt > 0.01f) ? (adv - s_traf_adv_last) / dt : 0;
+        s_traf_adv_last = adv;
+        s_traf_ms_last  = now_ms;
+
+        char b[160];
+        if (hc_ble_ready()) {
+            snprintf(b, sizeof(b),
+                     "adverts: %.0f /s\ntotal: %lu   ·   devices seen: %d",
+                     rate, (unsigned long)adv, hc_scanlog_ble_count());
+        } else {
+            snprintf(b, sizeof(b), "BLE radio not available");
+        }
+        lv_label_set_text(s_traf_ble, b);
+    }
+}
+
+static void open_traffic(void)
+{
+    lv_obj_t *ov = tool_shell("traffic");
+
+    /* WiFi panel */
+    lv_obj_t *wt = lv_label_create(ov);
+    lv_label_set_text(wt, LV_SYMBOL_WIFI "  WIFI LINK");
+    lv_obj_set_style_text_color(wt, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(wt, LV_ALIGN_TOP_LEFT, 44, 90);
+
+    s_traf_wifi = lv_label_create(ov);
+    lv_label_set_text(s_traf_wifi, "...");
+    lv_obj_set_style_text_color(s_traf_wifi, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(s_traf_wifi, LV_ALIGN_TOP_LEFT, 44, 118);
+
+    /* Live RSSI chart (one series, fixed point pool — no object churn). */
+    s_traf_chart = lv_chart_create(ov);
+    lv_obj_set_size(s_traf_chart, 760, 220);
+    lv_obj_align(s_traf_chart, LV_ALIGN_TOP_MID, 0, 190);
+    lv_chart_set_type(s_traf_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_range(s_traf_chart, LV_CHART_AXIS_PRIMARY_Y, -100, -30);
+    lv_chart_set_point_count(s_traf_chart, 60);
+    lv_chart_set_div_line_count(s_traf_chart, 5, 8);
+    lv_obj_set_style_bg_color(s_traf_chart, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_bg_opa(s_traf_chart, LV_OPA_40, 0);
+    lv_obj_set_style_border_color(s_traf_chart, lv_color_hex(HC_STRIPE), 0);
+    lv_obj_set_style_border_width(s_traf_chart, 1, 0);
+    lv_obj_set_style_line_color(s_traf_chart, lv_color_hex(HC_STRIPE), LV_PART_MAIN);
+    lv_obj_set_style_size(s_traf_chart, 0, 0, LV_PART_INDICATOR);   /* no point dots */
+    s_traf_ser = lv_chart_add_series(s_traf_chart, lv_color_hex(HC_HONEY),
+                                     LV_CHART_AXIS_PRIMARY_Y);
+
+    lv_obj_t *cl = lv_label_create(ov);
+    lv_label_set_text(cl, "RSSI  (-30 strong  ·  -100 weak)");
+    lv_obj_set_style_text_color(cl, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align_to(cl, s_traf_chart, LV_ALIGN_OUT_TOP_RIGHT, 0, -6);
+
+    /* BLE panel */
+    lv_obj_t *bt = lv_label_create(ov);
+    lv_label_set_text(bt, LV_SYMBOL_BLUETOOTH "  BLE TRAFFIC");
+    lv_obj_set_style_text_color(bt, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(bt, LV_ALIGN_TOP_LEFT, 44, 430);
+
+    s_traf_ble = lv_label_create(ov);
+    lv_label_set_text(s_traf_ble, "...");
+    lv_obj_set_style_text_color(s_traf_ble, lv_color_hex(HC_LCYAN), 0);
+    lv_obj_align(s_traf_ble, LV_ALIGN_TOP_LEFT, 44, 458);
+
+    s_traf_adv_last = hc_ble_adv_total();
+    s_traf_ms_last  = (uint32_t)(esp_timer_get_time() / 1000);
+    /* Make sure BLE keeps advertising data flowing for the rate meter. */
+    if (hc_ble_ready() && !hc_ble_scanning()) hc_ble_scan(0);
+    s_tool_timer = lv_timer_create(traffic_tick, 500, NULL);
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -2012,6 +2146,7 @@ static void async_open_tool(void *p)
         case TOOL_BLE:      open_ble(); break;
         case TOOL_RADAR:    open_radar(); break;
         case TOOL_LOGS:     open_logbook(); break;
+        case TOOL_TRAFFIC:  open_traffic(); break;
         default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
 }

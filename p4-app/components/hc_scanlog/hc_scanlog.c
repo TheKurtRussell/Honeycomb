@@ -35,7 +35,7 @@ void hc_scanlog_init(void)
         hc_storage_append(WIFI_CSV, "uptime_s,mac,rssi,channel,ssid\n");
     len = 0;
     if (hc_storage_read_head(BLE_CSV, probe, sizeof(probe), &len) != 0 || len == 0)
-        hc_storage_append(BLE_CSV, "uptime_s,mac,rssi,company,name\n");
+        hc_storage_append(BLE_CSV, "uptime_s,mac,rssi,company,tracker,name\n");
 }
 
 /* Find mac in table; return index or -1. Caller holds the lock. */
@@ -84,7 +84,8 @@ bool hc_scanlog_wifi(const char *ssid, const uint8_t mac[6], int rssi, int chann
     return is_new;
 }
 
-bool hc_scanlog_ble(const uint8_t mac[6], int rssi, uint16_t company, const char *name)
+bool hc_scanlog_ble(const uint8_t mac[6], int rssi, uint16_t company, const char *name,
+                    uint8_t tracker)
 {
     if (!mac) return false;
     if (!s_lock) hc_scanlog_init();
@@ -104,6 +105,7 @@ bool hc_scanlog_ble(const uint8_t mac[6], int rssi, uint16_t company, const char
         if (rssi > s_ble[i].rssi_best) s_ble[i].rssi_best = (int8_t)rssi;
         s_ble[i].channel = 0;
         s_ble[i].company = company;
+        if (tracker) s_ble[i].tracker = tracker;   /* sticky once classified */
         s_ble[i].count++;
         s_ble[i].last_s = now_s();
         if (name && name[0]) strlcpy(s_ble[i].label, name, sizeof(s_ble[i].label));
@@ -113,10 +115,10 @@ bool hc_scanlog_ble(const uint8_t mac[6], int rssi, uint16_t company, const char
     if (is_new) {
         char line[160];
         snprintf(line, sizeof(line),
-                 "%lu,%02X:%02X:%02X:%02X:%02X:%02X,%d,0x%04X,%s\n",
+                 "%lu,%02X:%02X:%02X:%02X:%02X:%02X,%d,0x%04X,%u,%s\n",
                  (unsigned long)now_s(),
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-                 rssi, company, (name && name[0]) ? name : "");
+                 rssi, company, (unsigned)tracker, (name && name[0]) ? name : "");
         hc_storage_append(BLE_CSV, line);
     }
     return is_new;
