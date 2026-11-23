@@ -24,6 +24,8 @@ extern "C" {
 
 /* Pass the lv_display_t* from the board BSP (as void* to avoid leaking the LVGL
  * type into non-UI code). If NULL, the UI runs in a no-op headless mode. */
+/* Show the themed boot splash as soon as the display is up (before radios). */
+void hc_ui_splash(void *lv_display);
 esp_err_t hc_ui_init(void *lv_display);
 
 /* thread-safe update hooks */

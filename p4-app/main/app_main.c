@@ -109,6 +109,7 @@ void app_main(void)
     c6fw_report();
 
     ESP_ERROR_CHECK(hc_board_init());        /* display BSP (headless until bound) */
+    hc_ui_splash(hc_board_lvgl_display());    /* themed loading screen during bring-up */
 
     /* C6 radio over ESP-Hosted, then SD. The C6 (SDIO slot 1) and the microSD
      * (slot 0) share the P4's one SDMMC controller, so order matters: power the

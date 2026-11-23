@@ -73,6 +73,11 @@ static bool s_active;
 #define COMB_OY (HDR_H + 12)
 #define COMB_COLS 15
 #define COMB_ROWS 8
+/* Focused decorative window around the functional cluster (cols 6-8, rows 2-4). */
+#define COMB_FOCUS_C0 4
+#define COMB_FOCUS_C1 10
+#define COMB_FOCUS_R0 1
+#define COMB_FOCUS_R1 5
 
 /* One shared outline shape; every cell reuses it (relative points). */
 static const lv_point_precise_t HEXP[] = {
@@ -219,6 +224,7 @@ static lv_obj_t  *s_overlay;
 static lv_obj_t  *s_comb;        /* the pannable comb container (hidden for tools, freed for the game) */
 static bool       s_comb_hidden; /* true when the comb is kept alive but hidden behind an overlay */
 static lv_obj_t  *s_scr;         /* active screen, for rebuilding the comb */
+static lv_obj_t  *s_splash_scr;  /* boot splash, replaced by hc_ui_init */
 static bool       s_tool_pending;
 static lv_timer_t *s_tool_timer;
 static lv_obj_t  *s_dash_psram;
@@ -288,9 +294,12 @@ static void build_comb(void)
     /* Track the bounding box of the interactive tiles so we can center them. */
     int minx = INT_MAX, miny = INT_MAX, maxx = INT_MIN, maxy = INT_MIN;
 
-    /* Pass 1 — decorative cells (dim hex outline, no wrapper, square caps). */
-    for (int c = 0; c < COMB_COLS; c++) {
-        for (int r = 0; r < COMB_ROWS; r++) {
+    /* Pass 1 — decorative cells (dim hex outline, no wrapper, square caps).
+     * Only draw a focused window around the functional cluster (cols 6-8,
+     * rows 2-4) so the honeycomb hugs the real nodes: fewer objects means a
+     * lighter comb to re-show on every tool close, and a tighter splash. */
+    for (int c = COMB_FOCUS_C0; c <= COMB_FOCUS_C1; c++) {
+        for (int r = COMB_FOCUS_R0; r <= COMB_FOCUS_R1; r++) {
             if (find_tile(c, r)) continue;
             int x = COMB_OX + c * HEX_AX;
             int y = COMB_OY + r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
@@ -1516,11 +1525,79 @@ static void tile_click_cb(lv_event_t *e)
 
 #endif /* HAVE_LVGL */
 
+/* Themed boot splash, shown the moment the display is up so the radio bring-up
+ * (a few seconds) reads as "initializing" instead of a blank white panel.
+ * hc_ui_init() replaces and deletes it. */
+void hc_ui_splash(void *lv_display)
+{
+    if (!lv_display) return;
+#if HAVE_LVGL
+    if (!bsp_display_lock(1000)) return;
+
+    s_splash_scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_splash_scr, lv_color_hex(HC_BG), 0);
+    lv_obj_set_style_bg_opa(s_splash_scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_splash_scr, 0, 0);
+    lv_obj_remove_flag(s_splash_scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* A little honeycomb cluster of hexes as the emblem. */
+    lv_obj_t *field = bare(s_splash_scr);
+    lv_obj_set_size(field, 7 * HEX_AX, 3 * HEX_AY);
+    lv_obj_align(field, LV_ALIGN_CENTER, 0, -70);
+    const int cells[][2] = { {1,0},{2,0},{3,0},{4,0},{5,0},
+                             {0,1},{1,1},{2,1},{3,1},{4,1},{5,1},
+                             {1,2},{2,2},{3,2},{4,2},{5,2} };
+    int mid = sizeof(cells) / sizeof(cells[0]) / 2;
+    for (int i = 0; i < (int)(sizeof(cells) / sizeof(cells[0])); i++) {
+        int c = cells[i][0], r = cells[i][1];
+        int x = c * HEX_AX;
+        int y = r * HEX_AY + ((c & 1) ? HEX_H / 2 : 0);
+        lv_obj_t *hex = lv_line_create(field);
+        lv_obj_set_pos(hex, x, y);
+        lv_line_set_points(hex, HEXP, 7);
+        lv_obj_set_style_line_color(hex, lv_color_hex(i == mid ? HC_HONEY : HC_LHONEY), 0);
+        lv_obj_set_style_line_width(hex, i == mid ? 4 : 2, 0);
+        lv_obj_set_style_line_rounded(hex, true, 0);
+    }
+
+    /* Bee mark in the centre hex. */
+    lv_obj_t *beebox = bare(s_splash_scr);
+    lv_obj_set_size(beebox, 60, 60);
+    lv_obj_align(beebox, LV_ALIGN_CENTER, 0, -70);
+    build_bee(beebox);
+
+    lv_obj_t *title = lv_label_create(s_splash_scr);
+    lv_label_set_text(title, "H O N E Y C O M B");
+    lv_obj_set_style_text_color(title, lv_color_hex(HC_HONEY), 0);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, 70);
+
+    lv_obj_t *sub = lv_label_create(s_splash_scr);
+    lv_label_set_text(sub, "TAB5 \xC2\xB7 WiFi / BLE recon bench");
+    lv_obj_set_style_text_color(sub, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 100);
+
+    lv_obj_t *boot = lv_label_create(s_splash_scr);
+    lv_label_set_text(boot, "initializing radios...");
+    lv_obj_set_style_text_color(boot, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(boot, LV_ALIGN_CENTER, 0, 150);
+
+    lv_screen_load(s_splash_scr);
+    bsp_display_unlock();
+#else
+    (void)lv_display;
+#endif
+}
+
 esp_err_t hc_ui_init(void *lv_display)
 {
     if (!lv_display) { ESP_LOGW(TAG, "headless UI"); return ESP_OK; }
 #if HAVE_LVGL
     if (!bsp_display_lock(1000)) return ESP_FAIL;
+
+    /* Replace the splash with a fresh main screen, then free the splash. */
+    lv_obj_t *main_scr = lv_obj_create(NULL);
+    lv_screen_load(main_scr);
+    if (s_splash_scr) { lv_obj_delete(s_splash_scr); s_splash_scr = NULL; }
 
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(HC_BG), 0);
