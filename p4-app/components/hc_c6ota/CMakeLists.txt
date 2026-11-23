@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "hc_c6ota.c"
     INCLUDE_DIRS "."
-    REQUIRES esp_partition esp_app_format esp_hosted
+    REQUIRES esp_partition esp_app_format bootloader_support esp_hosted
 )
