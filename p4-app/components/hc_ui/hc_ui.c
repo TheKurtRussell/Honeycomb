@@ -19,6 +19,7 @@
 #include "hc_scanlog.h"
 #include "hc_mesh.h"
 #include "hc_sigs.h"
+#include "hc_z154.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -97,7 +98,7 @@ static lv_obj_t *s_wifi_dot;
 static lv_obj_t *s_ble_dot;
 
 
-enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS, TOOL_TRAFFIC, TOOL_SURV };
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS, TOOL_TRAFFIC, TOOL_SURV, TOOL_Z154 };
 
 typedef struct {
     int col, row;
@@ -115,6 +116,7 @@ static const hc_tile_t s_tiles[] = {
     {7, 2, LV_SYMBOL_DIRECTORY, "files",   HC_HONEY, HC_LHONEY, TOOL_FILES},
     {8, 2, LV_SYMBOL_LIST,     "logbook",  HC_HONEY, HC_LHONEY, TOOL_LOGS},
     {9, 3, LV_SYMBOL_EYE_OPEN, "surveil",  HC_CYAN,  HC_LCYAN,  TOOL_SURV},
+    {5, 3, LV_SYMBOL_WIFI,     "802.15.4", HC_CYAN,  HC_LCYAN,  TOOL_Z154},
     {6, 3, LV_SYMBOL_GPS,      "radar",    HC_CYAN,  HC_LCYAN,  TOOL_RADAR},
     {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY, TOOL_BENCH},
     {8, 3, LV_SYMBOL_BLUETOOTH, "ble",     HC_CYAN,  HC_LCYAN,  TOOL_BLE},
@@ -270,6 +272,9 @@ static int        s_mesh_last_n;      /* mesh: last peer count (rebuild-on-chang
 static lv_obj_t  *s_surv_list;        /* surveillance: flagged-device list */
 static lv_obj_t  *s_surv_status;      /* surveillance: status line */
 static int        s_surv_last_n;      /* surveillance: last hit count */
+static lv_obj_t  *s_z154_list;        /* 802.15.4: per-channel bars */
+static lv_obj_t  *s_z154_status;      /* 802.15.4: status line */
+static uint32_t   s_z154_last_ms;     /* 802.15.4: last result drawn */
 #define RADAR_MAXBLIP 48
 static lv_obj_t  *s_radar_area;       /* radar: the circular scope */
 static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
@@ -455,6 +460,8 @@ static void close_tool(lv_event_t *e)
     s_mesh_last_n = -1;
     s_surv_list = s_surv_status = NULL;
     s_surv_last_n = -1;
+    s_z154_list = s_z154_status = NULL;
+    s_z154_last_ms = 0;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -2455,6 +2462,109 @@ static void open_surv(void)
     s_tool_timer = lv_timer_create(surv_tick, 1500, NULL);
 }
 
+/* ---- 802.15.4 (Zigbee/Thread/Matter) activity scan ---- */
+
+static void z154_tick(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_z154_list) return;
+
+    if (s_z154_status) {
+        const char *m; uint32_t col = HC_CYAN;
+        if (hc_z154_scanning())             m = "scanning channels 11-26...";
+        else if (!hc_z154_have_result())    m = "idle — hit scan";
+        else if (hc_z154_status() == 1)   { m = "C6 radio busy — couldn't borrow for 802.15.4"; col = HC_RED; }
+        else                                m = "scan complete";
+        lv_label_set_text(s_z154_status, m);
+        lv_obj_set_style_text_color(s_z154_status, lv_color_hex(col), 0);
+    }
+
+    /* Redraw only when a new result arrives. */
+    uint32_t lm = hc_z154_last_ms();
+    if (lm == s_z154_last_ms) return;
+    s_z154_last_ms = lm;
+
+    hc_z154_chan_t ch[16];
+    int n = hc_z154_get(ch, 16);
+    lv_obj_clean(s_z154_list);
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *row = lv_obj_create(s_z154_list);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), 30);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        char lab[24];
+        snprintf(lab, sizeof(lab), "ch %2d", ch[i].channel);
+        lv_obj_t *l = lv_label_create(row);
+        lv_label_set_text(l, lab);
+        lv_obj_set_style_text_color(l, lv_color_hex(HC_DIMTXT), 0);
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+
+        /* activity bar: width by frame count (log-ish), honey if active */
+        int f = ch[i].frames;
+        int w = f == 0 ? 2 : (f >= 40 ? 400 : 10 + f * 10);
+        lv_obj_t *bar = lv_obj_create(row);
+        lv_obj_remove_style_all(bar);
+        lv_obj_set_size(bar, w, 16);
+        lv_obj_align(bar, LV_ALIGN_LEFT_MID, 60, 0);
+        lv_obj_set_style_radius(bar, 3, 0);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(f ? HC_HONEY : HC_STRIPE), 0);
+        lv_obj_set_style_bg_opa(bar, f ? LV_OPA_COVER : LV_OPA_40, 0);
+
+        if (f) {
+            char info[32];
+            snprintf(info, sizeof(info), "%d frm · %ddBm", f, ch[i].rssi);
+            lv_obj_t *il = lv_label_create(row);
+            lv_label_set_text(il, info);
+            lv_obj_set_style_text_color(il, lv_color_hex(HC_LHONEY), 0);
+            lv_obj_align(il, LV_ALIGN_RIGHT_MID, 0, 0);
+        }
+    }
+}
+
+static void z154_scan_cb(lv_event_t *e) { (void)e; hc_z154_scan(0); }
+
+static void open_z154(void)
+{
+    lv_obj_t *ov = tool_shell("802.15.4");
+
+    s_z154_status = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_z154_status, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_z154_status, LV_ALIGN_TOP_LEFT, 44, 100);
+    lv_label_set_text(s_z154_status, "idle — hit scan");
+
+    lv_obj_t *scan = lv_button_create(ov);
+    lv_obj_set_size(scan, 130, 44);
+    lv_obj_align(scan, LV_ALIGN_TOP_RIGHT, -44, 92);
+    lv_obj_set_style_bg_color(scan, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(scan, lv_color_hex(HC_CYAN), 0);
+    lv_obj_set_style_border_width(scan, 1, 0);
+    lv_obj_add_event_cb(scan, z154_scan_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *sl = lv_label_create(scan);
+    lv_label_set_text(sl, LV_SYMBOL_REFRESH "  scan");
+    lv_obj_set_style_text_color(sl, lv_color_hex(HC_CYAN), 0);
+    lv_obj_center(sl);
+
+    lv_obj_t *note = lv_label_create(ov);
+    lv_label_set_text(note,
+        "Zigbee / Thread / Matter band · frames seen per channel while the C6\n"
+        "briefly borrows the radio. Receive-only.");
+    lv_obj_set_style_text_color(note, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(note, LV_ALIGN_TOP_LEFT, 44, 140);
+
+    s_z154_list = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_z154_list);
+    lv_obj_set_size(s_z154_list, LV_PCT(92), 470);
+    lv_obj_align(s_z154_list, LV_ALIGN_TOP_MID, 0, 190);
+    lv_obj_set_flex_flow(s_z154_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_z154_list, 4, 0);
+    lv_obj_set_scroll_dir(s_z154_list, LV_DIR_VER);
+
+    s_z154_last_ms = 0;
+    hc_z154_scan(0);                          /* kick a scan on open */
+    s_tool_timer = lv_timer_create(z154_tick, 500, NULL);
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -2470,6 +2580,7 @@ static void async_open_tool(void *p)
         case TOOL_LOGS:     open_logbook(); break;
         case TOOL_TRAFFIC:  open_traffic(); break;
         case TOOL_SURV:     open_surv(); break;
+        case TOOL_Z154:     open_z154(); break;
         case TOOL_MESH:     open_mesh(); break;
         default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }

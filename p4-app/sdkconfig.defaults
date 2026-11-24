@@ -78,6 +78,12 @@ CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
 # reached over the same SDIO link (HCI forwarded by ESP-Hosted). Needs the
 # BLE-capable 3.1.0 C6 slave (flashed by the C6 OTA). Local controller disabled.
 CONFIG_ESP_HOSTED_HOST_FEAT_BT=y
+
+# --- Peer Data Transfer (Custom RPC) ---
+# Generic (msg_id, bytes) channel to the C6 — used to request an 802.15.4
+# (Zigbee/Thread) scan and receive the per-channel results.
+CONFIG_ESP_HOSTED_HOST_FEAT_PEER_DATA=y
+
 CONFIG_BT_ENABLED=y
 CONFIG_BT_CONTROLLER_DISABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y

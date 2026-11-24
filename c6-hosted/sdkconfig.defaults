@@ -30,3 +30,13 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_WIFI_NVS_ENABLED=y
+
+# Peer Data Transfer (Custom RPC): generic (msg_id, bytes) channel to the host.
+# This is how the host asks for an 802.15.4 scan and gets the results back,
+# without forking the ESP-Hosted protocol.
+CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA=y
+
+# IEEE 802.15.4 radio (Zigbee/Thread/Matter band). Time-sliced with Wi-Fi via
+# the software coexistence arbiter — we briefly borrow the radio for a scan.
+CONFIG_IEEE802154_ENABLED=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
