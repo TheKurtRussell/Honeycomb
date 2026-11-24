@@ -27,6 +27,7 @@
 #include "hc_mode_manager.h"
 #include "hc_flasher.h"
 #include "hc_c6updater.h"
+#include "hc_c6ota.h"
 #include "hc_ui.h"
 
 #define TAG "honeycomb"
@@ -102,6 +103,10 @@ static void c6fw_report(void)
     ESP_LOGI(TAG, "c6fw: %lu KB partition, staged image magic=0x%02x (%s)",
              (unsigned long)(p->size / 1024), magic,
              magic == 0xE9 ? "valid app image" : "EMPTY/invalid");
+    if (magic == 0xE9)
+        ESP_LOGW(TAG, "c6 slave: %s",
+                 hc_c6ota_stale("c6fw") ? "STALE — run 'Update C6 radio' in config"
+                                        : "up to date");
 }
 
 void app_main(void)

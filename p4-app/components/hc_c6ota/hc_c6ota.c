@@ -17,6 +17,7 @@
 
 #include "esp_hosted.h"
 #include "esp_hosted_ota.h"
+#include "nvs.h"
 
 #define TAG "hc_c6ota"
 /* Max OTA write payload is EH_HOST_CP_OTA_CHUNK_MAX (SDIO 1536 buf minus the
@@ -97,6 +98,50 @@ esp_err_t hc_c6ota_from_partition(const char *label, hc_c6ota_cb cb, void *ctx)
     ESP_LOGI(TAG, "C6 OTA write complete (%u bytes)", (unsigned)fw_size);
     if (cb) cb(100, "written — activating", ctx);
     return ESP_OK;
+}
+
+/* Read the app-elf SHA256 of the slave image staged in partition `label`.
+ * The esp_app_desc_t sits right after the image + first-segment headers (0x20).
+ * Returns ESP_OK and fills sha[32] on a valid app image. */
+static esp_err_t staged_sha(const char *label, uint8_t sha[32])
+{
+    const esp_partition_t *p =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40, label);
+    if (!p) return ESP_ERR_NOT_FOUND;
+    esp_app_desc_t desc;
+    esp_err_t r = esp_partition_read(p, sizeof(esp_image_header_t) +
+                                     sizeof(esp_image_segment_header_t),
+                                     &desc, sizeof(desc));
+    if (r != ESP_OK) return r;
+    if (desc.magic_word != ESP_APP_DESC_MAGIC_WORD) return ESP_ERR_INVALID_STATE;
+    memcpy(sha, desc.app_elf_sha256, 32);
+    return ESP_OK;
+}
+
+bool hc_c6ota_stale(const char *label)
+{
+    uint8_t staged[32];
+    if (staged_sha(label, staged) != ESP_OK) return false;  /* no valid image to offer */
+    uint8_t installed[32]; size_t len = sizeof(installed);
+    nvs_handle_t h;
+    bool have = false;
+    if (nvs_open("hc_c6", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_blob(h, "sha", installed, &len) == ESP_OK && len == 32) have = true;
+        nvs_close(h);
+    }
+    return !have || memcmp(installed, staged, 32) != 0;
+}
+
+void hc_c6ota_mark_installed(const char *label)
+{
+    uint8_t staged[32];
+    if (staged_sha(label, staged) != ESP_OK) return;
+    nvs_handle_t h;
+    if (nvs_open("hc_c6", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, "sha", staged, 32);
+        nvs_commit(h);
+        nvs_close(h);
+    }
 }
 
 void hc_c6ota_activate_and_restart(void)

@@ -581,6 +581,7 @@ static void c6ota_task(void *arg)
     if (r == ESP_OK) {
         strlcpy(s_c6ota_msg, "activating — C6 reboot", sizeof(s_c6ota_msg));
         lv_async_call(c6ota_ui_apply, NULL);
+        hc_c6ota_mark_installed("c6fw");    /* record this slave so staleness clears */
         vTaskDelay(pdMS_TO_TICKS(500));
         hc_c6ota_activate_and_restart();   /* reboots the P4 — no return */
     }
@@ -714,8 +715,13 @@ static void open_config(void)
     lv_obj_set_style_border_width(ota, 1, 0);
     lv_obj_add_event_cb(ota, c6ota_confirm_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *ol = lv_label_create(ota);
-    lv_label_set_text(ol, LV_SYMBOL_REFRESH "  Update C6 radio (BLE)");
-    lv_obj_set_style_text_color(ol, lv_color_hex(HC_HONEY), 0);
+    /* Flag when the staged slave differs from what's installed on the C6 — e.g.
+     * right after a firmware update that ships a new slave (BLE + 802.15.4). */
+    bool stale = hc_c6ota_stale("c6fw");
+    lv_label_set_text(ol, stale ? LV_SYMBOL_WARNING "  Update C6 radio — NEEDED"
+                                : LV_SYMBOL_REFRESH "  Update C6 radio (BLE + 802.15.4)");
+    lv_obj_set_style_text_color(ol, lv_color_hex(stale ? HC_RED : HC_HONEY), 0);
+    lv_obj_set_style_border_color(ota, lv_color_hex(stale ? HC_RED : HC_HONEY), 0);
     lv_obj_center(ol);
 
     dash_timer_cb(NULL);
