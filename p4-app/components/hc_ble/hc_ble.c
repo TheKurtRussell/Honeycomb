@@ -309,7 +309,10 @@ static int ring_gap_cb(struct ble_gap_event *e, void *arg)
                 ring_finish(HC_RING_FAIL);
         } else {
             s_ring_conn = BLE_HS_CONN_HANDLE_NONE;
-            snprintf(s_ring_msg, sizeof(s_ring_msg), "connect failed (%d)", e->connect.status);
+            /* A timeout here means the tag never answered the connection — it is
+             * almost always not in separated mode, or its address rotated. */
+            snprintf(s_ring_msg, sizeof(s_ring_msg),
+                     "no answer (%d) - separate tag from owner, retry", e->connect.status);
             s_ring_state = HC_RING_FAIL;
         }
         break;
@@ -343,8 +346,9 @@ bool hc_ble_ring(const uint8_t addr[6], uint8_t addr_type)
     s_ring_svc_found = false;
     s_ring_msg[0]    = 0;
     s_ring_state     = HC_RING_CONNECTING;
-    /* 8s connect timeout; default connection params. */
-    int rc = ble_gap_connect(own, &peer, 8000, NULL, ring_gap_cb, NULL);
+    /* 6s connect timeout; default connection params. Shorter so a tag that
+     * isn't accepting connections fails fast instead of hanging the UI. */
+    int rc = ble_gap_connect(own, &peer, 6000, NULL, ring_gap_cb, NULL);
     if (rc != 0) {
         snprintf(s_ring_msg, sizeof(s_ring_msg), "connect call err %d", rc);
         s_ring_state = HC_RING_FAIL;

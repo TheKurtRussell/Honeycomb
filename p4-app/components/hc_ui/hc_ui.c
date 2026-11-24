@@ -290,6 +290,7 @@ static lv_obj_t  *s_fox_name;
 static uint8_t    s_fox_addr[6];
 static uint8_t    s_fox_addr_type;
 static uint8_t    s_fox_tracker;
+static bool       s_fox_conn;         /* target advertised as connectable */
 static lv_obj_t  *s_fox_ring_btn;     /* "ring" button (trackers only) */
 static lv_obj_t  *s_fox_ring_lbl;     /* ring status text */
 static int        s_fox_last = -127;
@@ -1480,7 +1481,7 @@ static void open_explorer(void)
 /* Timer on the LVGL thread: refresh the device list from hc_ble_get(). */
 /* Foxhunt can be opened from the radar or the BLE list. */
 static void foxhunt_open(const uint8_t *addr, uint8_t addr_type, uint8_t tracker,
-                         uint16_t company, const char *name);
+                         uint16_t company, const char *name, bool connectable);
 static void fox_update(void);
 
 /* Snapshot behind the BLE list rows, so a tapped row maps to its device. */
@@ -1493,7 +1494,7 @@ static void ble_row_cb(lv_event_t *e)
     if (i < 0 || i >= s_ble_view_n) return;
     foxhunt_open(s_ble_view[i].addr, s_ble_view[i].addr_type,
                  s_ble_view[i].tracker, s_ble_view[i].company_id,
-                 s_ble_view[i].name);
+                 s_ble_view[i].name, s_ble_view[i].connectable);
 }
 
 static void ble_refresh(lv_timer_t *t)
@@ -1743,12 +1744,13 @@ static void fox_close_cb(lv_event_t *e)
 
 /* Build the foxhunt panel for a specific device (from radar or the BLE list). */
 static void foxhunt_open(const uint8_t *addr, uint8_t addr_type, uint8_t tracker,
-                         uint16_t company, const char *name)
+                         uint16_t company, const char *name, bool connectable)
 {
     if (s_fox_panel || !addr) return;
     memcpy(s_fox_addr, addr, 6);
     s_fox_addr_type = addr_type;
     s_fox_tracker   = tracker;
+    s_fox_conn      = connectable;
     s_fox_last = -127;
 
     const char *ven = hc_ble_vendor(company);
@@ -1823,8 +1825,12 @@ static void foxhunt_open(const uint8_t *addr, uint8_t addr_type, uint8_t tracker
         lv_obj_center(rl);
 
         s_fox_ring_lbl = lv_label_create(s_fox_panel);
-        lv_label_set_text(s_fox_ring_lbl, "");
-        lv_obj_set_style_text_color(s_fox_ring_lbl, lv_color_hex(HC_DIMTXT), 0);
+        /* Pre-hint: a tracker that isn't advertising connectably won't answer a
+         * ring until it's separated from its owner. */
+        lv_label_set_text(s_fox_ring_lbl,
+            s_fox_conn ? "" : "not connectable now — separate it from its owner");
+        lv_obj_set_style_text_color(s_fox_ring_lbl,
+            lv_color_hex(s_fox_conn ? HC_DIMTXT : HC_AMBERW), 0);
         lv_obj_align(s_fox_ring_lbl, LV_ALIGN_BOTTOM_MID, 0, -156);
     }
 }
@@ -1835,7 +1841,7 @@ static void blip_click_cb(lv_event_t *e)
     if (i < 0 || i >= s_radar_n) return;
     foxhunt_open(s_radar_devs[i].addr, s_radar_devs[i].addr_type,
                  s_radar_devs[i].tracker, s_radar_devs[i].company_id,
-                 s_radar_devs[i].name);
+                 s_radar_devs[i].name, s_radar_devs[i].connectable);
 }
 
 static void radar_tick(lv_timer_t *t)
