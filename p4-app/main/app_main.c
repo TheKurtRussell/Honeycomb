@@ -23,6 +23,7 @@
 #include "hc_storage.h"
 #include "hc_scanlog.h"
 #include "hc_z154.h"
+#include "hc_obd.h"
 #include "hc_explorer.h"
 #include "hc_mode_manager.h"
 #include "hc_flasher.h"
@@ -130,6 +131,7 @@ void app_main(void)
     hc_storage_mount();                      /* SD on slot 0; non-fatal if absent */
     hc_scanlog_init();                       /* scan logbook (CSV on SD) */
     if (c6_up) hc_z154_init();               /* 802.15.4 scan over peer-data RPC */
+    if (ble_up) hc_obd_init();               /* BLE ELM327 car diagnostics */
 
     hc_ui_init(hc_board_lvgl_display());     /* bound to the BSP display */
     hc_ui_set_radio(c6_up, ble_up);          /* header dots reflect the live radios */

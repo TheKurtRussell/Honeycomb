@@ -20,6 +20,7 @@
 #include "hc_mesh.h"
 #include "hc_sigs.h"
 #include "hc_z154.h"
+#include "hc_obd.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -98,7 +99,7 @@ static lv_obj_t *s_wifi_dot;
 static lv_obj_t *s_ble_dot;
 
 
-enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS, TOOL_TRAFFIC, TOOL_SURV, TOOL_Z154 };
+enum { TOOL_BENCH, TOOL_EXPLORER, TOOL_BLE, TOOL_RADAR, TOOL_MESH, TOOL_CONFIG, TOOL_FILES, TOOL_LOGS, TOOL_TRAFFIC, TOOL_SURV, TOOL_Z154, TOOL_CAR };
 
 typedef struct {
     int col, row;
@@ -117,6 +118,7 @@ static const hc_tile_t s_tiles[] = {
     {8, 2, LV_SYMBOL_LIST,     "logbook",  HC_HONEY, HC_LHONEY, TOOL_LOGS},
     {9, 3, LV_SYMBOL_EYE_OPEN, "surveil",  HC_CYAN,  HC_LCYAN,  TOOL_SURV},
     {5, 3, LV_SYMBOL_WIFI,     "802.15.4", HC_CYAN,  HC_LCYAN,  TOOL_Z154},
+    {9, 4, LV_SYMBOL_CHARGE,   "car",      HC_HONEY, HC_LHONEY, TOOL_CAR},
     {6, 3, LV_SYMBOL_GPS,      "radar",    HC_CYAN,  HC_LCYAN,  TOOL_RADAR},
     {7, 3, LV_SYMBOL_DOWNLOAD, "bench",    HC_HONEY, HC_LHONEY, TOOL_BENCH},
     {8, 3, LV_SYMBOL_BLUETOOTH, "ble",     HC_CYAN,  HC_LCYAN,  TOOL_BLE},
@@ -275,6 +277,12 @@ static int        s_surv_last_n;      /* surveillance: last hit count */
 static lv_obj_t  *s_z154_list;        /* 802.15.4: per-channel bars */
 static lv_obj_t  *s_z154_status;      /* 802.15.4: status line */
 static uint32_t   s_z154_last_ms;     /* 802.15.4: last result drawn */
+static lv_obj_t  *s_car_list;         /* car: dongle list / metrics host */
+static lv_obj_t  *s_car_status;       /* car: status line */
+static lv_obj_t  *s_car_metrics;      /* car: metrics label */
+static int        s_car_last_state;   /* car: rebuild-on-change */
+static hc_ble_dev_t s_car_view[12];   /* car: dongle candidates */
+static int        s_car_view_n;
 #define RADAR_MAXBLIP 48
 static lv_obj_t  *s_radar_area;       /* radar: the circular scope */
 static lv_obj_t  *s_radar_sweep;      /* radar: rotating sweep line */
@@ -456,12 +464,15 @@ static void close_tool(lv_event_t *e)
     s_traf_wifi = s_traf_ble = s_traf_chart = NULL;
     s_traf_ser = NULL;
     hc_mesh_stop();
+    hc_obd_disconnect();                  /* end any ELM327 session on leaving */
     s_mesh_list = s_mesh_status = s_mesh_self = NULL;
     s_mesh_last_n = -1;
     s_surv_list = s_surv_status = NULL;
     s_surv_last_n = -1;
     s_z154_list = s_z154_status = NULL;
     s_z154_last_ms = 0;
+    s_car_list = s_car_status = s_car_metrics = NULL;
+    s_car_last_state = -1;
     s_tool_pending = false;
     /* Bring the comb back. If it was only hidden (a tool), just un-hide it —
      * instant, no rebuild. If it was freed (the game), rebuild it async. */
@@ -2571,6 +2582,143 @@ static void open_z154(void)
     s_tool_timer = lv_timer_create(z154_tick, 500, NULL);
 }
 
+/* ---- car: Ioniq 5 health over a BLE ELM327 dongle ---- */
+
+static void car_connect_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (i < 0 || i >= s_car_view_n) return;
+    hc_obd_connect(s_car_view[i].addr, s_car_view[i].addr_type);
+}
+
+static void car_disc_cb(lv_event_t *e) { (void)e; hc_obd_disconnect(); }
+
+static void car_build_idle(void)   /* list candidate dongles */
+{
+    lv_obj_clean(s_car_list);
+    s_car_metrics = NULL;
+
+    static hc_ble_dev_t devs[48];
+    int n = hc_ble_get(devs, 48);
+    s_car_view_n = 0;
+    for (int i = 0; i < n && s_car_view_n < 12; i++)
+        if (hc_obd_name_is_dongle(devs[i].name)) s_car_view[s_car_view_n++] = devs[i];
+
+    if (s_car_view_n == 0) {
+        lv_obj_t *l = lv_label_create(s_car_list);
+        lv_label_set_text(l, "scanning for an ELM327 dongle...\nplug it into the car's OBD-II port and power the car");
+        lv_obj_set_style_text_color(l, lv_color_hex(HC_DIMTXT), 0);
+        return;
+    }
+    for (int i = 0; i < s_car_view_n; i++) {
+        lv_obj_t *b = lv_button_create(s_car_list);
+        lv_obj_set_size(b, LV_PCT(100), 56);
+        lv_obj_set_style_bg_color(b, lv_color_hex(HC_PANEL), 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(HC_HONEY), 0);
+        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_add_event_cb(b, car_connect_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *l = lv_label_create(b);
+        char t[48];
+        snprintf(t, sizeof(t), LV_SYMBOL_BLUETOOTH " connect  %s  (%ddBm)",
+                 s_car_view[i].name[0] ? s_car_view[i].name : "OBD", s_car_view[i].rssi);
+        lv_label_set_text(l, t);
+        lv_obj_set_style_text_color(l, lv_color_hex(HC_LHONEY), 0);
+        lv_obj_center(l);
+    }
+}
+
+static void car_build_connected(void)
+{
+    lv_obj_clean(s_car_list);
+    s_car_metrics = lv_label_create(s_car_list);
+    lv_label_set_text(s_car_metrics, "reading...");
+    lv_obj_set_style_text_color(s_car_metrics, lv_color_hex(HC_LHONEY), 0);
+
+    lv_obj_t *dc = lv_button_create(s_car_list);
+    lv_obj_set_size(dc, 160, 48);
+    lv_obj_set_style_bg_color(dc, lv_color_hex(HC_PANEL), 0);
+    lv_obj_set_style_border_color(dc, lv_color_hex(HC_RED), 0);
+    lv_obj_set_style_border_width(dc, 1, 0);
+    lv_obj_add_event_cb(dc, car_disc_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *dl = lv_label_create(dc);
+    lv_label_set_text(dl, "disconnect");
+    lv_obj_set_style_text_color(dl, lv_color_hex(HC_RED), 0);
+    lv_obj_center(dl);
+}
+
+static void car_tick(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_car_list) return;
+    int st = hc_obd_state();
+    bool connected = (st != HC_OBD_IDLE && st != HC_OBD_ERROR);
+
+    if (s_car_status) lv_label_set_text(s_car_status, hc_obd_status());
+
+    if (st != s_car_last_state) {
+        s_car_last_state = st;
+        if (connected) car_build_connected();
+        else           car_build_idle();
+    }
+
+    if (!connected) {
+        if (hc_ble_ready() && !hc_ble_scanning()) hc_ble_scan(0);
+        /* refresh candidate list if the dongle set changed */
+        static hc_ble_dev_t devs[48];
+        int n = hc_ble_get(devs, 48), cnt = 0;
+        for (int i = 0; i < n; i++) if (hc_obd_name_is_dongle(devs[i].name)) cnt++;
+        if (cnt != s_car_view_n) car_build_idle();
+        return;
+    }
+
+    if (s_car_metrics && st == HC_OBD_POLLING) {
+        hc_obd_metrics_t m; hc_obd_get(&m);
+        char b[320];
+        if (m.valid)
+            snprintf(b, sizeof(b),
+                "SoC (BMS)   %.1f %%\nSoH          %.1f %%\n"
+                "cell delta   %.0f mV   (min %.2f / max %.2f V)\n"
+                "pack temp    %d / %d C\n"
+                "pack         %.1f V   %.1f A\n"
+                "12V aux      %.1f V\n\nraw 0101: %s",
+                m.soc_bms, m.soh, m.cell_delta_v * 1000.0f, m.cell_min_v, m.cell_max_v,
+                m.temp_min, m.temp_max, m.dc_voltage, m.dc_current, m.aux_12v,
+                hc_obd_last_raw());
+        else
+            snprintf(b, sizeof(b), "handshake ok — waiting for first BMS frame...\nraw: %s",
+                     hc_obd_last_raw());
+        lv_label_set_text(s_car_metrics, b);
+    }
+}
+
+static void open_car(void)
+{
+    lv_obj_t *ov = tool_shell("car");
+
+    s_car_status = lv_label_create(ov);
+    lv_obj_set_style_text_color(s_car_status, lv_color_hex(HC_CYAN), 0);
+    lv_obj_align(s_car_status, LV_ALIGN_TOP_LEFT, 44, 100);
+    lv_label_set_text(s_car_status, "...");
+
+    lv_obj_t *note = lv_label_create(ov);
+    lv_label_set_text(note, "Ioniq 5 battery health over a BLE ELM327 dongle · read-only");
+    lv_obj_set_style_text_color(note, lv_color_hex(HC_DIMTXT), 0);
+    lv_obj_align(note, LV_ALIGN_TOP_LEFT, 44, 128);
+
+    s_car_list = lv_obj_create(ov);
+    lv_obj_remove_style_all(s_car_list);
+    lv_obj_set_size(s_car_list, LV_PCT(92), 470);
+    lv_obj_align(s_car_list, LV_ALIGN_TOP_MID, 0, 168);
+    lv_obj_set_flex_flow(s_car_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_car_list, 8, 0);
+    lv_obj_set_scroll_dir(s_car_list, LV_DIR_VER);
+
+    s_car_last_state = -1;
+    s_car_view_n = -1;                 /* force first build */
+    car_tick(NULL);
+    s_tool_timer = lv_timer_create(car_tick, 700, NULL);
+}
+
 static void async_open_tool(void *p)
 {
     s_tool_pending = false;
@@ -2587,6 +2735,7 @@ static void async_open_tool(void *p)
         case TOOL_TRAFFIC:  open_traffic(); break;
         case TOOL_SURV:     open_surv(); break;
         case TOOL_Z154:     open_z154(); break;
+        case TOOL_CAR:      open_car(); break;
         case TOOL_MESH:     open_mesh(); break;
         default:            open_msg("tool", "waiting on the C6 radio\nflash it via the M5 downloader", HC_DIMTXT); break;
     }
